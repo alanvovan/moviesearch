@@ -224,7 +224,7 @@ private struct FeedScreen: View {
         .sensoryFeedback(.impact(weight: .light, intensity: 0.7), trigger: model.actionTick)
         .task { await model.prepareAndLoad(context: modelContext) }
         .sheet(isPresented: $showIdeas) { IdeasSheet() }
-        .sheet(item: $trailer) { request in
+        .fullScreenCover(item: $trailer) { request in
             TrailerSheet(movieID: request.id, initialKey: request.videoKey)
         }
     }
@@ -267,7 +267,13 @@ private struct FeedScreen: View {
                         taste: taste,
                         insets: insets,
                         isActive: model.position == movie.id && trailer == nil,
-                        onTrailer: { trailer = TrailerRequest(id: movie.id, videoKey: movie.youtubeKey) },
+                        onTrailer: {
+                            var transaction = Transaction()
+                            transaction.disablesAnimations = true
+                            withTransaction(transaction) {
+                                trailer = TrailerRequest(id: movie.id, videoKey: movie.youtubeKey)
+                            }
+                        },
                         onDislike: { model.dislike(movie, context: modelContext) },
                         onLike: { model.like(movie, isSuper: false, context: modelContext) },
                         onSuperlike: { model.like(movie, isSuper: true, context: modelContext) }
@@ -341,14 +347,12 @@ private struct FeedCard: View {
             VStack(spacing: 14) {
                 Spacer().allowsHitTesting(false)
                 Button(action: onTrailer) {
-                    Image(systemName: "play.fill")
-                        .font(.system(size: 22, weight: .semibold))
-                        .foregroundStyle(.black)
-                        .frame(width: 64, height: 64)
-                        .background(.white, in: Circle())
-                        .shadow(color: .black.opacity(0.34), radius: 16, y: 8)
+                    Label("Смотреть трейлер", systemImage: "play.fill")
+                        .font(.system(size: 17, weight: .semibold))
+                        .padding(.horizontal, 22)
+                        .padding(.vertical, 14)
                 }
-                .buttonStyle(PrismIconStyle())
+                .buttonStyle(PrismCapsuleStyle())
                 .accessibilityLabel("Трейлер")
                 Spacer().allowsHitTesting(false)
                 VStack(alignment: .leading, spacing: 10) {

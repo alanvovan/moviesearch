@@ -27,20 +27,22 @@ struct TrailerSheet: View {
                         .font(.footnote.weight(.semibold))
                         .foregroundStyle(.white.opacity(0.8))
                 }
-                Spacer(minLength: 0)
             }
+            .frame(maxHeight: .infinity, alignment: .center)
             .padding(16)
             .prismScreen()
             .navigationTitle("Трейлер")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Закрыть") { dismiss() }
+                    Button("Закрыть") {
+                        var transaction = Transaction()
+                        transaction.disablesAnimations = true
+                        withTransaction(transaction) { dismiss() }
+                    }
                 }
             }
         }
-        .presentationDetents([.medium, .large])
-        .presentationDragIndicator(.visible)
         .presentationBackground(PrismPalette.background)
         .preferredColorScheme(.dark)
         .task { await load() }
