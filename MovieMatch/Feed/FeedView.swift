@@ -15,9 +15,14 @@ final class FeedModel {
     var banner: String?
     var missingKey = false
     var actionTick = 0
+    var isRefreshing = false
+    var refreshNote: String?
+    var refreshNoteTick = 0
 
     private var client: TMDBClient?
+    private var loadToken = 0
     private var cursor = 0
+    private var shown: Set<Int> = []
     private var recentSkips: [Int] = []
     private var handled: Set<Int> = []
     private var detailAttempts: Set<Int> = []
@@ -35,10 +40,110 @@ final class FeedModel {
         await loadMore(context: context, fill: true)
     }
 
-    func retry(context: ModelContext) async {
+    func refresh(context: ModelContext) async {
+        guard !missingKey, client != nil, !isRefreshing else { return }
+        loadToken += 1
+        let token = loadToken
+        isRefreshing = true
+        refreshNote = nil
+        defer {
+            if token == loadToken {
+                isRefreshing = false
+            }
+        }
+
+        remember(queue)
+        var localCursor = cursor
+        var excluded = shown
+        var collected: [TMDBMovie] = []
+        var emptyStreak = 0
+        let ceiling = max(cursor + 24, 15)
+        do {
+            while collected.count < 6 && emptyStreak < 5 && localCursor < ceiling {
+                guard token == loadToken, let client else { return }
+                let page = try await fetch(at: localCursor, client: client)
+                guard token == loadToken else { return }
+                localCursor += 1
+                let fresh = offerable(page, context: context, seen: excluded)
+                if fresh.isEmpty {
+                    emptyStreak += 1
+                } else {
+                    emptyStreak = 0
+                    collected.append(contentsOf: fresh)
+                    excluded.formUnion(fresh.map(\.id))
+                }
+            }
+            guard token == loadToken else { return }
+            guard !collected.isEmpty else {
+                if queue.isEmpty {
+                    banner = "Лента пустая"
+                }
+                return
+            }
+            cursor = localCursor
+            shown = excluded
+            recentSkips.removeAll()
+            handled.removeAll()
+            detailAttempts.removeAll()
+            banner = nil
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            withTransaction(transaction) {
+                queue = collected
+                position = collected.first?.id
+            }
+            if let position {
+                await prefetch(position)
+            }
+        } catch is CancellationError {
+            return
+        } catch let error as TMDBError {
+            guard token == loadToken else { return }
+            noteRefreshFailure(error.userMessage)
+        } catch {
+            guard token == loadToken else { return }
+            noteRefreshFailure(TMDBError.badStatus(0).userMessage)
+        }
+    }
+
+    func present(_ movie: TMDBMovie) {
         banner = nil
-        cursor = 0
-        await loadMore(context: context, fill: true)
+        refreshNote = nil
+        if queue.contains(where: { $0.id == movie.id }) {
+            position = movie.id
+            return
+        }
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            queue.insert(movie, at: 0)
+            position = movie.id
+        }
+        remember([movie])
+    }
+
+    func suggestions(matching raw: String) async throws -> [TMDBMovie] {
+        guard let client else { return [] }
+        let query = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard query.count >= 2 else { return [] }
+        let matches = try await client.search(query: query)
+        var seen: Set<Int> = []
+        var result: [TMDBMovie] = []
+        for movie in matches where seen.insert(movie.id).inserted {
+            result.append(movie)
+            if result.count == 8 { break }
+        }
+        return result
+    }
+
+    private func noteRefreshFailure(_ message: String) {
+        if queue.isEmpty {
+            banner = message
+            refreshNote = nil
+            return
+        }
+        refreshNote = message
+        refreshNoteTick += 1
     }
 
     func loadMoreIfNeeded(current: Int, context: ModelContext) async {
@@ -95,24 +200,32 @@ final class FeedModel {
     }
 
     private func loadMore(context: ModelContext, fill: Bool) async {
-        guard !isLoading, let client, !missingKey, cursor < 15 else { return }
+        let token = loadToken
+        guard !isLoading, !isRefreshing, let client, !missingKey, cursor < 40 else { return }
         isLoading = true
         defer { isLoading = false }
         let target = fill ? 6 : 1
         var added = 0
         var emptyStreak = 0
+        var localCursor = cursor
         do {
-            while added < target && emptyStreak < 3 && cursor < 15 {
-                let page = try await fetchNext(client)
+            while added < target && emptyStreak < 3 && localCursor < 40 {
+                guard token == loadToken else { return }
+                let page = try await fetch(at: localCursor, client: client)
+                guard token == loadToken else { return }
+                localCursor += 1
+                cursor = localCursor
                 let fresh = offerable(page, context: context)
                 if fresh.isEmpty {
                     emptyStreak += 1
                 } else {
                     emptyStreak = 0
                     queue.append(contentsOf: fresh)
+                    remember(fresh)
                     added += fresh.count
                 }
             }
+            guard token == loadToken else { return }
             if position == nil {
                 position = queue.first?.id
             }
@@ -127,16 +240,17 @@ final class FeedModel {
         } catch is CancellationError {
             return
         } catch let error as TMDBError {
+            guard token == loadToken else { return }
             banner = error.userMessage
         } catch {
+            guard token == loadToken else { return }
             banner = TMDBError.badStatus(0).userMessage
         }
     }
 
-    private func fetchNext(_ client: TMDBClient) async throws -> [TMDBMovie] {
-        let kind = cursor % 3
-        let page = cursor / 3 + 1
-        cursor += 1
+    private func fetch(at index: Int, client: TMDBClient) async throws -> [TMDBMovie] {
+        let kind = index % 3
+        let page = index / 3 + 1
         switch kind {
         case 0: return try await client.popular(page: page)
         case 1: return try await client.topRated(page: page)
@@ -144,16 +258,22 @@ final class FeedModel {
         }
     }
 
-    private func offerable(_ page: [TMDBMovie], context: ModelContext) -> [TMDBMovie] {
+    private func offerable(
+        _ page: [TMDBMovie],
+        context: ModelContext,
+        seen preset: Set<Int>? = nil,
+        includeSkipped: Bool = false
+    ) -> [TMDBMovie] {
         let stored = (try? context.fetch(FetchDescriptor<StoredMovie>())) ?? []
         let hides = (try? context.fetch(FetchDescriptor<StoredHide>())) ?? []
         let taste = LibraryStore.taste(in: context)
         let blocked = Set(stored.map(\.tmdbID))
-        var seen = Set(queue.map(\.id))
+        var seen = preset ?? Set(queue.map(\.id))
         var result: [TMDBMovie] = []
         for movie in page {
             guard seen.insert(movie.id).inserted else { continue }
-            if recentSkips.contains(movie.id) || blocked.contains(movie.id) { continue }
+            if blocked.contains(movie.id) { continue }
+            if !includeSkipped, recentSkips.contains(movie.id) { continue }
             if let hide = hides.first(where: { $0.tmdbID == movie.id }) {
                 let percent = TasteEngine.match(user: taste, film: movie.tasteAxes).percent
                 if HideRule.isSuppressed(
@@ -170,6 +290,10 @@ final class FeedModel {
             result.append(movie)
         }
         return result
+    }
+
+    private func remember(_ movies: [TMDBMovie]) {
+        shown.formUnion(movies.map(\.id))
     }
 
     private func enrich(_ id: Int, client: TMDBClient) async {
@@ -203,33 +327,195 @@ private struct FeedScreen: View {
     @Query private var tastes: [StoredTaste]
     @State private var trailer: TrailerRequest?
     @State private var showIdeas = false
+    @State private var searchText = ""
+    @State private var suggestions: [TMDBMovie] = []
+    @State private var suggestionNote: String?
+    @State private var isSuggesting = false
+    @State private var pull: CGFloat = 0
+    @State private var pullTick = 0
+    @FocusState private var searchFocused: Bool
 
     private var taste: TasteState { tastes.first?.state ?? .empty }
 
+    private var isAtTop: Bool {
+        guard let first = model.queue.first?.id else { return false }
+        return model.position == first
+    }
+
+    private var showSuggestionPanel: Bool {
+        !suggestions.isEmpty || suggestionNote != nil
+    }
+
+    private var suggestionHeight: CGFloat {
+        let note: CGFloat = suggestionNote != nil && suggestions.isEmpty ? 52 : 0
+        return min(320, note + CGFloat(suggestions.count) * 64)
+    }
+
     var body: some View {
-        ZStack(alignment: .topTrailing) {
+        ZStack(alignment: .top) {
             content
+            if !model.missingKey && (searchFocused || showSuggestionPanel) {
+                Color.black.opacity(showSuggestionPanel ? 0.42 : 0.001)
+                    .ignoresSafeArea()
+                    .onTapGesture(perform: tapOutsideSearch)
+            }
             if !model.missingKey {
-                Button {
-                    showIdeas = true
-                } label: {
-                    Text("Идеи")
-                        .font(.system(size: 15, weight: .semibold))
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 10)
-                }
-                .buttonStyle(MovieMatchCapsuleStyle())
-                .padding(.trailing, 16)
-                .padding(.top, 8)
+                searchChrome
             }
         }
         .movieMatchScreen()
         .sensoryFeedback(.impact(weight: .light, intensity: 0.7), trigger: model.actionTick)
+        .sensoryFeedback(.impact(weight: .light, intensity: 0.8), trigger: pullTick)
         .task { await model.prepareAndLoad(context: modelContext) }
+        .task(id: searchText) { await updateSuggestions() }
+        .task(id: model.refreshNoteTick) {
+            guard model.refreshNote != nil else { return }
+            try? await Task.sleep(for: .seconds(2.6))
+            guard !Task.isCancelled else { return }
+            model.refreshNote = nil
+        }
+        .onChange(of: pull) { old, new in
+            if old < FeedPull.distance && new >= FeedPull.distance {
+                pullTick += 1
+            }
+        }
         .sheet(isPresented: $showIdeas) { IdeasSheet() }
         .fullScreenCover(item: $trailer) { request in
             TrailerSheet(movieID: request.id, initialKey: request.videoKey)
         }
+    }
+
+    private var searchChrome: some View {
+        VStack(spacing: 8) {
+            HStack(spacing: 8) {
+                searchField
+                ideasButton
+            }
+            if pull > FeedPull.reveal || model.isRefreshing {
+                FeedRefreshCue(pull: pull, isRefreshing: model.isRefreshing)
+                    .allowsHitTesting(false)
+            } else if let note = model.refreshNote, suggestions.isEmpty {
+                Text(note)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(.ultraThinMaterial, in: Capsule())
+                    .allowsHitTesting(false)
+            }
+            if showSuggestionPanel {
+                suggestionPanel
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 8)
+    }
+
+    private var searchField: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass")
+                .foregroundStyle(.white.opacity(0.72))
+                .accessibilityHidden(true)
+            TextField("Название фильма", text: $searchText)
+                .focused($searchFocused)
+                .accessibilityLabel("Поиск фильма")
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .submitLabel(.search)
+                .tint(.white)
+                .onSubmit(pickFirstSuggestion)
+            if isSuggesting {
+                ProgressView()
+                    .controlSize(.small)
+                    .tint(.white)
+            } else if !searchText.isEmpty {
+                Button(action: clearSearch) {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.white.opacity(0.65))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Очистить поиск")
+            }
+        }
+        .font(.system(size: 16, weight: .medium))
+        .foregroundStyle(.white)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity)
+        .background(.white.opacity(0.12), in: Capsule())
+        .overlay(Capsule().stroke(.white.opacity(0.18), lineWidth: 1))
+    }
+
+    private var ideasButton: some View {
+        Button {
+            searchFocused = false
+            showIdeas = true
+        } label: {
+            Text("Идеи")
+                .font(.system(size: 15, weight: .semibold))
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
+        }
+        .buttonStyle(MovieMatchCapsuleStyle())
+    }
+
+    private var suggestionPanel: some View {
+        ScrollView {
+            LazyVStack(spacing: 0) {
+                if let suggestionNote, suggestions.isEmpty {
+                    Text(suggestionNote)
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(.white.opacity(0.78))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 16)
+                }
+                ForEach(suggestions) { movie in
+                    Button {
+                        choose(movie)
+                    } label: {
+                        suggestionRow(movie)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+        .frame(height: suggestionHeight)
+        .scrollIndicators(.hidden)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(.white.opacity(0.16), lineWidth: 1)
+        }
+    }
+
+    private func suggestionRow(_ movie: TMDBMovie) -> some View {
+        HStack(spacing: 10) {
+            PosterImage(path: movie.posterPath, size: "w185")
+                .frame(width: 32, height: 48)
+                .background(.white.opacity(0.08))
+                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(movie.title)
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+                if let year = movie.releaseYear {
+                    Text(String(year))
+                        .font(.caption)
+                        .foregroundStyle(.white.opacity(0.62))
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(suggestionLabel(movie))
+        .accessibilityAddTraits(.isButton)
     }
 
     @ViewBuilder
@@ -240,18 +526,31 @@ private struct FeedScreen: View {
                 subtitle: "Лента пустая, пока ключ не задан для сборки."
             )
         } else if model.queue.isEmpty {
-            if model.isLoading {
+            if model.isLoading && !model.isRefreshing {
                 ProgressView().tint(.white)
             } else {
-                MovieMatchMessage(
-                    title: model.banner ?? "Лента пустая",
-                    subtitle: model.banner == nil ? nil : "Можно попробовать ещё раз.",
-                    actionTitle: "Повторить",
-                    action: { Task { await model.retry(context: modelContext) } }
-                )
+                emptyFeed
             }
         } else {
             pager
+        }
+    }
+
+    private var emptyFeed: some View {
+        GeometryReader { proxy in
+            ScrollView {
+                MovieMatchMessage(
+                    title: model.banner ?? "Лента пустая",
+                    subtitle: "Потяните вниз, чтобы обновить.",
+                    actionTitle: "Повторить",
+                    action: { Task { await reloadFeed() } }
+                )
+                .padding(.horizontal, 24)
+                .frame(width: proxy.size.width, height: proxy.size.height)
+            }
+            .scrollBounceBehavior(.always, axes: .vertical)
+            .scrollIndicators(.hidden)
+            .refreshable { await reloadFeed() }
         }
     }
 
@@ -287,9 +586,16 @@ private struct FeedScreen: View {
             .scrollTargetLayout()
         }
         .scrollTargetBehavior(.paging)
+        .scrollBounceBehavior(.always, axes: .vertical)
         .scrollPosition(id: $model.position)
         .scrollIndicators(.hidden)
+        .scrollDismissesKeyboard(.interactively)
+        .scrollDisabled(searchFocused || showSuggestionPanel)
         .ignoresSafeArea()
+        .refreshable { await reloadFeed() }
+        .feedPullToRefresh(enabled: isAtTop && !searchFocused && !showSuggestionPanel, isRefreshing: model.isRefreshing, pull: $pull) {
+            await reloadFeed()
+        }
         .onChange(of: model.position) { old, new in
             model.noteScroll(from: old, to: new)
             guard let new else { return }
@@ -298,6 +604,177 @@ private struct FeedScreen: View {
                 await model.loadMoreIfNeeded(current: new, context: modelContext)
             }
         }
+    }
+
+    private func updateSuggestions() async {
+        let trimmed = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count >= 2 else {
+            suggestions = []
+            suggestionNote = nil
+            isSuggesting = false
+            return
+        }
+        isSuggesting = true
+        do {
+            try await Task.sleep(for: .milliseconds(280))
+        } catch {
+            return
+        }
+        guard !Task.isCancelled else { return }
+        do {
+            let found = try await model.suggestions(matching: trimmed)
+            guard !Task.isCancelled else { return }
+            guard searchText.trimmingCharacters(in: .whitespacesAndNewlines) == trimmed else { return }
+            suggestions = found
+            suggestionNote = found.isEmpty ? "Ничего не найдено" : nil
+            isSuggesting = false
+        } catch is CancellationError {
+            return
+        } catch {
+            guard !Task.isCancelled else { return }
+            suggestions = []
+            suggestionNote = "Не удалось загрузить подсказки"
+            isSuggesting = false
+        }
+    }
+
+    private func choose(_ movie: TMDBMovie) {
+        searchFocused = false
+        searchText = ""
+        suggestions = []
+        suggestionNote = nil
+        isSuggesting = false
+        Task { @MainActor in
+            model.present(movie)
+            await model.prefetch(movie.id)
+        }
+    }
+
+    private func pickFirstSuggestion() {
+        guard let movie = suggestions.first else { return }
+        choose(movie)
+    }
+
+    private func clearSearch() {
+        searchText = ""
+        suggestions = []
+        suggestionNote = nil
+        searchFocused = true
+    }
+
+    private func tapOutsideSearch() {
+        if searchFocused {
+            searchFocused = false
+            return
+        }
+        suggestions = []
+        suggestionNote = nil
+    }
+
+    private func suggestionLabel(_ movie: TMDBMovie) -> String {
+        if let year = movie.releaseYear {
+            return "\(movie.title), \(year)"
+        }
+        return movie.title
+    }
+
+    private func reloadFeed() async {
+        searchFocused = false
+        await model.refresh(context: modelContext)
+    }
+}
+
+private enum FeedPull {
+    static let distance: CGFloat = 88
+    static let reveal: CGFloat = 20
+}
+
+private struct FeedRefreshCue: View {
+    var pull: CGFloat
+    var isRefreshing: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    private var ready: Bool { pull >= FeedPull.distance }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            if isRefreshing {
+                ProgressView()
+                    .controlSize(.small)
+                    .tint(.white)
+                Text("Обновляем")
+            } else {
+                Image(systemName: "arrow.down")
+                    .rotationEffect(.degrees(!reduceMotion && ready ? 180 : 0))
+                Text(ready ? "Отпустите, чтобы обновить" : "Потяните, чтобы обновить")
+            }
+        }
+        .font(.system(size: 13, weight: .semibold))
+        .foregroundStyle(.white)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(.ultraThinMaterial, in: Capsule())
+        .overlay(Capsule().stroke(.white.opacity(0.16), lineWidth: 1))
+        .opacity(isRefreshing ? 1 : min(1, pull / 36))
+        .accessibilityElement(children: .combine)
+    }
+}
+
+private struct FeedPullRefreshModifier: ViewModifier {
+    var enabled: Bool
+    var isRefreshing: Bool
+    @Binding var pull: CGFloat
+    var onRefresh: () async -> Void
+
+    @State private var gestureOpen = false
+    @State private var startedAtTop = false
+
+    func body(content: Content) -> some View {
+        content.simultaneousGesture(pullGesture)
+    }
+
+    private var pullGesture: some Gesture {
+        DragGesture(minimumDistance: 18, coordinateSpace: .local)
+            .onChanged { value in
+                let dy = value.translation.height
+                let dx = abs(value.translation.width)
+                if !gestureOpen || (abs(dy) < 24 && dx < 24) {
+                    gestureOpen = true
+                    startedAtTop = enabled && !isRefreshing && dy > 0
+                }
+                guard startedAtTop, !isRefreshing else { return }
+                pull = dy > dx ? max(0, dy) : 0
+            }
+            .onEnded { value in
+                let dy = value.translation.height
+                let shouldRefresh = startedAtTop
+                    && !isRefreshing
+                    && dy >= FeedPull.distance
+                    && dy > abs(value.translation.width)
+                gestureOpen = false
+                startedAtTop = false
+                pull = 0
+                guard shouldRefresh else { return }
+                Task { await onRefresh() }
+            }
+    }
+}
+
+extension View {
+    fileprivate func feedPullToRefresh(
+        enabled: Bool,
+        isRefreshing: Bool,
+        pull: Binding<CGFloat>,
+        onRefresh: @escaping () async -> Void
+    ) -> some View {
+        modifier(
+            FeedPullRefreshModifier(
+                enabled: enabled,
+                isRefreshing: isRefreshing,
+                pull: pull,
+                onRefresh: onRefresh
+            )
+        )
     }
 }
 
@@ -356,7 +833,7 @@ private struct FeedCard: View {
             .frame(maxWidth: .infinity)
         }
         .padding(.horizontal, 18)
-        .padding(.top, insets.top + 56)
+        .padding(.top, insets.top + 76)
         .padding(.bottom, insets.bottom + 12)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background { backdrop(accent: accent) }
