@@ -19,7 +19,7 @@
 /* Begin PBXFileReference section */
 		071F4E473087C2B800F78C70 /* MovieMatch.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = MovieMatch.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		071F4E613087C2B800F78C70 /* MovieMatchTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = MovieMatchTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
-		071F4E683087C2B800F78C70 /* secrets.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; name = secrets.xcconfig; path = ../secrets.xcconfig; sourceTree = SOURCE_ROOT; };
+		071F4E683087C2B800F78C70 /* secrets.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; name = secrets.xcconfig; path = secrets.xcconfig; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */

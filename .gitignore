@@ -1,0 +1,11 @@
+# macOS
+.DS_Store
+
+# Xcode state for this Mac
+xcuserdata/
+*.xcuserstate
+DerivedData/
+build/
+
+# TMDB key. The project reads it, git does not.
+secrets.xcconfig
