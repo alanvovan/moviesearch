@@ -1,6 +1,6 @@
 //
 //  TrailerSheet.swift
-//  Prism
+//  MovieMatch
 //
 
 import SwiftUI
@@ -30,7 +30,7 @@ struct TrailerSheet: View {
             }
             .frame(maxHeight: .infinity, alignment: .center)
             .padding(16)
-            .prismScreen()
+            .movieMatchScreen()
             .navigationTitle("Трейлер")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -43,7 +43,7 @@ struct TrailerSheet: View {
                 }
             }
         }
-        .presentationBackground(PrismPalette.background)
+        .presentationBackground(MovieMatchPalette.background)
         .preferredColorScheme(.dark)
         .task { await load() }
     }
@@ -132,7 +132,7 @@ struct YouTubeEmbed: UIViewRepresentable {
         """
         // YouTube требует Referer, идентифицирующий приложение (https://<bundle id>);
         // подмена youtube.com даёт ошибки 152/153.
-        let bundleID = (Bundle.main.bundleIdentifier ?? "com.remember.Prism").lowercased()
+        let bundleID = (Bundle.main.bundleIdentifier ?? "com.remember.MovieMatch").lowercased()
         webView.loadHTMLString(html, baseURL: URL(string: "https://\(bundleID)"))
     }
 

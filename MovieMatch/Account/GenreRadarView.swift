@@ -1,6 +1,6 @@
 //
 //  GenreRadarView.swift
-//  Prism
+//  MovieMatch
 //
 
 import SwiftUI

@@ -1,6 +1,6 @@
 //
 //  FeedView.swift
-//  Prism
+//  MovieMatch
 //
 
 import SwiftData
@@ -218,12 +218,12 @@ private struct FeedScreen: View {
                         .padding(.horizontal, 16)
                         .padding(.vertical, 10)
                 }
-                .buttonStyle(PrismCapsuleStyle())
+                .buttonStyle(MovieMatchCapsuleStyle())
                 .padding(.trailing, 16)
                 .padding(.top, 8)
             }
         }
-        .prismScreen()
+        .movieMatchScreen()
         .sensoryFeedback(.impact(weight: .light, intensity: 0.7), trigger: model.actionTick)
         .task { await model.prepareAndLoad(context: modelContext) }
         .sheet(isPresented: $showIdeas) { IdeasSheet() }
@@ -235,7 +235,7 @@ private struct FeedScreen: View {
     @ViewBuilder
     private var content: some View {
         if model.missingKey {
-            PrismMessage(
+            MovieMatchMessage(
                 title: "Нужен ключ TMDB",
                 subtitle: "Лента пустая, пока ключ не задан для сборки."
             )
@@ -243,7 +243,7 @@ private struct FeedScreen: View {
             if model.isLoading {
                 ProgressView().tint(.white)
             } else {
-                PrismMessage(
+                MovieMatchMessage(
                     title: model.banner ?? "Лента пустая",
                     subtitle: model.banner == nil ? nil : "Можно попробовать ещё раз.",
                     actionTitle: "Повторить",
@@ -330,7 +330,7 @@ private struct FeedCard: View {
 
     var body: some View {
         let profile = FilmAxisHeuristic.profile(FilmSignals(movie: movie))
-        let accent = PrismPalette.accent(for: profile.family)
+        let accent = MovieMatchPalette.accent(for: profile.family)
         let score = TasteEngine.match(user: taste, film: profile.axes)
         VStack(alignment: .leading, spacing: 14) {
             header(profile: profile, accent: accent, score: score)
@@ -364,7 +364,7 @@ private struct FeedCard: View {
 
     private func backdrop(accent: Color) -> some View {
         ZStack {
-            PrismPalette.background
+            MovieMatchPalette.background
             if movie.backdropPath != nil || movie.posterPath != nil {
                 PosterImage(path: movie.backdropPath ?? movie.posterPath, size: "w1280")
             } else {
@@ -372,9 +372,9 @@ private struct FeedCard: View {
             }
             LinearGradient(
                 colors: [
-                    PrismPalette.background.opacity(0.55),
-                    PrismPalette.background.opacity(0.78),
-                    PrismPalette.background.opacity(0.97),
+                    MovieMatchPalette.background.opacity(0.55),
+                    MovieMatchPalette.background.opacity(0.78),
+                    MovieMatchPalette.background.opacity(0.97),
                 ],
                 startPoint: .top,
                 endPoint: .bottom
@@ -451,7 +451,7 @@ private struct FeedCard: View {
                 .padding(.vertical, 12)
                 .background(.white, in: Capsule())
         }
-        .buttonStyle(PrismIconStyle())
+        .buttonStyle(MovieMatchIconStyle())
         .accessibilityLabel("Смотреть трейлер")
     }
 
@@ -603,7 +603,7 @@ private struct FeedCard: View {
                 .background(accent, in: Circle())
                 .shadow(color: .black.opacity(0.28), radius: 12, y: 6)
         }
-        .buttonStyle(PrismIconStyle())
+        .buttonStyle(MovieMatchIconStyle())
         .accessibilityLabel(label)
     }
 }

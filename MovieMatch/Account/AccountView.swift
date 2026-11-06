@@ -1,6 +1,6 @@
 //
 //  AccountView.swift
-//  Prism
+//  MovieMatch
 //
 
 import SwiftData
@@ -32,7 +32,7 @@ struct AccountView: View {
                 }
                 .padding(20)
             }
-            .prismScreen()
+            .movieMatchScreen()
             .navigationTitle("Аккаунт")
             .navigationDestination(for: AccountRoute.self) { route in
                 switch route {
@@ -128,7 +128,7 @@ private struct HiddenMoviesView: View {
     var body: some View {
         Group {
             if hides.isEmpty {
-                PrismMessage(title: "Скрытых фильмов нет")
+                MovieMatchMessage(title: "Скрытых фильмов нет")
             } else {
                 ScrollView {
                     LazyVStack(spacing: 12) {
@@ -151,7 +151,7 @@ private struct HiddenMoviesView: View {
                                 .font(.caption.weight(.semibold))
                                 .padding(.horizontal, 12)
                                 .padding(.vertical, 8)
-                                .buttonStyle(PrismCapsuleStyle())
+                                .buttonStyle(MovieMatchCapsuleStyle())
                             }
                         }
                     }
@@ -159,7 +159,7 @@ private struct HiddenMoviesView: View {
                 }
             }
         }
-        .prismScreen()
+        .movieMatchScreen()
         .navigationTitle("Скрытые")
         .navigationBarTitleDisplayMode(.inline)
     }

@@ -1,11 +1,11 @@
 //
 //  GenreGroupTests.swift
-//  PrismTests
+//  MovieMatchTests
 //
 
 import Foundation
 import Testing
-@testable import Prism
+@testable import MovieMatch
 
 private let listedIDs = [28, 12, 37, 35, 10751, 18, 10749, 878, 14, 53, 27, 9648, 80, 16, 36, 10752, 99, 10402, 10770]
 

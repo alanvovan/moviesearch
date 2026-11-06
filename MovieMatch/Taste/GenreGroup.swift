@@ -1,6 +1,6 @@
 //
 //  GenreGroup.swift
-//  Prism
+//  MovieMatch
 //
 
 import Foundation

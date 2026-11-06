@@ -1,6 +1,6 @@
 //
 //  TMDBModels.swift
-//  Prism
+//  MovieMatch
 //
 
 import Foundation
