@@ -22,8 +22,7 @@ struct AddMovieSheet: View {
                 HStack {
                     TextField("Название", text: $query)
                         .padding(12)
-                        .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 14))
-                        .foregroundStyle(.white)
+                        .background(MovieMatchPalette.surface, in: RoundedRectangle(cornerRadius: 14))
                         .submitLabel(.search)
                         .onSubmit { Task { await search() } }
                     Button("Найти") { Task { await search() } }
@@ -51,13 +50,12 @@ struct AddMovieSheet: View {
                     rating: nil,
                     review: ""
                 ) { rating, review in
-                    LibraryStore.saveFromSearch(movie, rating: rating, review: review, in: modelContext)
+                    LibraryStore.markWatched(movie, rating: rating, review: review, in: modelContext)
                     dismiss()
                 }
             }
         }
-        .presentationBackground(MovieMatchPalette.background)
-        .preferredColorScheme(.dark)
+        .movieMatchSheet()
     }
 
     @ViewBuilder
@@ -66,7 +64,7 @@ struct AddMovieSheet: View {
             MovieMatchMessage(title: "Нужен ключ TMDB", subtitle: "Поиск пустой, пока ключ не задан для сборки.")
         } else if isLoading {
             Spacer()
-            ProgressView().tint(.white)
+            ProgressView()
             Spacer()
         } else if let banner, results.isEmpty {
             MovieMatchMessage(title: banner)
@@ -83,11 +81,11 @@ struct AddMovieSheet: View {
                                     .clipShape(RoundedRectangle(cornerRadius: 8))
                                 VStack(alignment: .leading) {
                                     Text(movie.title)
-                                        .foregroundStyle(.white)
+                                        .foregroundStyle(MovieMatchPalette.textPrimary)
                                     if let year = movie.releaseYear {
                                         Text(String(year))
                                             .font(.caption)
-                                            .foregroundStyle(.white.opacity(0.6))
+                                            .foregroundStyle(MovieMatchPalette.textSecondary)
                                     }
                                 }
                                 Spacer()

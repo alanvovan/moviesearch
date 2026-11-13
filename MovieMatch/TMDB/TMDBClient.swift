@@ -9,7 +9,16 @@ nonisolated struct TMDBClient: Sendable {
     var apiKey: String
     var session: URLSession = .shared
 
-    static func live(session: URLSession = .shared) -> TMDBClient? {
+    /// Без тайм-аута заблокированный хост держит запрос минуту, и экран выглядит зависшим.
+    static let liveSession: URLSession = {
+        let configuration = URLSessionConfiguration.default
+        configuration.timeoutIntervalForRequest = 12
+        configuration.timeoutIntervalForResource = 20
+        configuration.waitsForConnectivity = false
+        return URLSession(configuration: configuration)
+    }()
+
+    static func live(session: URLSession = liveSession) -> TMDBClient? {
         guard let apiKey = TMDBConfig.apiKey else { return nil }
         return TMDBClient(apiKey: apiKey, session: session)
     }
@@ -120,6 +129,8 @@ private nonisolated struct PagePayload: Decodable {
         var backdropPath: String?
         var releaseYear: Int?
         var genreIDs: [Int]
+        var voteAverage: Double?
+        var voteCount: Int?
 
         enum CodingKeys: String, CodingKey {
             case id, title, overview
@@ -127,6 +138,8 @@ private nonisolated struct PagePayload: Decodable {
             case backdropPath = "backdrop_path"
             case releaseDate = "release_date"
             case genreIDs = "genre_ids"
+            case voteAverage = "vote_average"
+            case voteCount = "vote_count"
         }
 
         init(from decoder: Decoder) throws {
@@ -139,6 +152,9 @@ private nonisolated struct PagePayload: Decodable {
             let date = try container.decodeIfPresent(String.self, forKey: .releaseDate) ?? ""
             releaseYear = Int(date.prefix(4))
             genreIDs = try container.decodeIfPresent([Int].self, forKey: .genreIDs) ?? []
+            let count = try container.decodeIfPresent(Int.self, forKey: .voteCount) ?? 0
+            voteCount = count > 0 ? count : nil
+            voteAverage = try count > 0 ? container.decodeIfPresent(Double.self, forKey: .voteAverage) : nil
         }
 
         func movie() -> TMDBMovie? {
@@ -155,7 +171,9 @@ private nonisolated struct PagePayload: Decodable {
                 keywords: [],
                 runtime: nil,
                 youtubeKey: nil,
-                enriched: false
+                enriched: false,
+                voteAverage: voteAverage,
+                voteCount: voteCount
             )
         }
     }

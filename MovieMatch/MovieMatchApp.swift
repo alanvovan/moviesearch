@@ -19,7 +19,7 @@ struct MovieMatchApp: App {
 enum MovieMatchContainer {
     static let shared: ModelContainer = {
         do {
-            return try ModelContainer(for: StoredMovie.self, StoredTaste.self, StoredHide.self)
+            return try ModelContainer(for: StoredMovie.self, StoredTaste.self, StoredHide.self, StoredEvent.self)
         } catch {
             fatalError("SwiftData container failed: \(error)")
         }

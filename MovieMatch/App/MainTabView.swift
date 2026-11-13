@@ -10,11 +10,11 @@ struct MainTabView: View {
     init() {
         let appearance = UITabBarAppearance()
         appearance.configureWithOpaqueBackground()
-        appearance.backgroundColor = UIColor(red: 0.012, green: 0.012, blue: 0.016, alpha: 1)
-        appearance.stackedLayoutAppearance.normal.iconColor = UIColor.white.withAlphaComponent(0.55)
-        appearance.stackedLayoutAppearance.normal.titleTextAttributes = [.foregroundColor: UIColor.white.withAlphaComponent(0.55)]
-        appearance.stackedLayoutAppearance.selected.iconColor = .white
-        appearance.stackedLayoutAppearance.selected.titleTextAttributes = [.foregroundColor: UIColor.white]
+        appearance.backgroundColor = MovieMatchPalette.backgroundUIColor
+        appearance.stackedLayoutAppearance.normal.iconColor = MovieMatchPalette.tabNormalUIColor
+        appearance.stackedLayoutAppearance.normal.titleTextAttributes = [.foregroundColor: MovieMatchPalette.tabNormalUIColor]
+        appearance.stackedLayoutAppearance.selected.iconColor = MovieMatchPalette.tabSelectedUIColor
+        appearance.stackedLayoutAppearance.selected.titleTextAttributes = [.foregroundColor: MovieMatchPalette.tabSelectedUIColor]
         UITabBar.appearance().standardAppearance = appearance
         UITabBar.appearance().scrollEdgeAppearance = appearance
     }
@@ -28,7 +28,6 @@ struct MainTabView: View {
             AccountView()
                 .tabItem { Label("Аккаунт", systemImage: "person") }
         }
-        .tint(.white)
-        .preferredColorScheme(.dark)
+        .tint(MovieMatchPalette.textPrimary)
     }
 }

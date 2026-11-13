@@ -46,20 +46,13 @@ nonisolated enum GenreGroup: String, CaseIterable, Sendable, Equatable {
         Set(allCases.filter { !$0.genreIDs.isDisjoint(with: genreIDs) })
     }
 
-    static let superlikeWeight = 2.0
-
-    /// Вес каждой группы по библиотеке, нормированный на самую частую группу (0...1).
-    /// Фильм засчитывается в каждую свою группу один раз, суперлайк — с весом 2.
-    static func shares(in snapshot: LibrarySnapshot) -> [GenreGroup: Double] {
-        var totals: [GenreGroup: Double] = [:]
-        for item in snapshot.items {
-            let weight = item.superlikedAt != nil || item.status == .superlike ? superlikeWeight : 1
-            for group in groups(for: item.genreIDs) {
-                totals[group, default: 0] += weight
-            }
-        }
-        let peak = totals.values.max() ?? 0
-        guard peak > 0 else { return [:] }
-        return totals.mapValues { $0 / peak }
+    /// Доля жанров фильма в каждой группе: s_g = (жанры фильма из g) / (известные жанры фильма). Сумма 1 или 0.
+    static func shares(for genreIDs: [Int]) -> [GenreGroup: Double] {
+        let known = Set(genreIDs).compactMap { id in allCases.first { $0.genreIDs.contains(id) } }
+        guard !known.isEmpty else { return [:] }
+        var counts: [GenreGroup: Double] = [:]
+        for group in known { counts[group, default: 0] += 1 }
+        let total = Double(known.count)
+        return counts.mapValues { $0 / total }
     }
 }

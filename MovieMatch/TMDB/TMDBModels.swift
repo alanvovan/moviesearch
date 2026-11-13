@@ -151,4 +151,8 @@ nonisolated struct TMDBMovie: Identifiable, Hashable, Sendable {
     var tasteAxes: [TasteAxis: Double] {
         FilmAxisHeuristic.profile(FilmSignals(movie: self)).axes
     }
+
+    var features: FilmFeatures {
+        FilmFeatures(axes: tasteAxes, genreIDs: genreIDs, voteAverage: voteAverage, voteCount: voteCount)
+    }
 }

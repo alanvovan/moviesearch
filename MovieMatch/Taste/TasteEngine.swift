@@ -2,164 +2,507 @@
 //  TasteEngine.swift
 //  MovieMatch
 //
+//  Реализация MATH_SPEC.md: байесовская линейная регрессия полезности по признакам фильма.
+//
 
 import Foundation
 
-nonisolated struct AxisVector: Equatable, Codable, Sendable {
-    var components: [TasteAxis: Double]
-    var weight: Double
+nonisolated enum TasteEventKind: String, Codable, Sendable, CaseIterable {
+    case onboardingLove
+    case onboardingRate
+    case rate
+    case planLater
+    case notInterested
+    case watchedUnrated
+    case removeMovie
+    case reset
+}
+
+nonisolated struct TasteEvent: Equatable, Sendable {
+    var kind: TasteEventKind
+    var tmdbID: Int
+    var value: Int?
+    var at: Date
+    var sequence: Int
+    var axes: [TasteAxis: Double]
+    var genreIDs: [Int]
+
+    init(
+        kind: TasteEventKind,
+        tmdbID: Int,
+        value: Int? = nil,
+        at: Date,
+        sequence: Int,
+        axes: [TasteAxis: Double] = [:],
+        genreIDs: [Int] = []
+    ) {
+        self.kind = kind
+        self.tmdbID = tmdbID
+        self.value = value
+        self.at = at
+        self.sequence = sequence
+        self.axes = axes
+        self.genreIDs = genreIDs
+    }
+}
+
+nonisolated struct FilmFeatures: Equatable, Sendable {
+    var axes: [TasteAxis: Double]
+    var genreIDs: [Int]
+    var voteAverage: Double? = nil
+    var voteCount: Int? = nil
+}
+
+/// Значение группы на диаграмме: медиана апостериорной вероятности «понравится» и 80% интервал.
+nonisolated struct GroupValue: Equatable, Codable, Sendable {
+    var point: Double
+    var lower: Double
+    var upper: Double
+    var effective: Double
+
+    var isWide: Bool {
+        upper - lower > TasteParameters.diagramWideWidth || effective < TasteParameters.diagramMinEffective
+    }
 }
 
 nonisolated struct TasteState: Equatable, Codable, Sendable {
-    var mean: [TasteAxis: Double]
-    var weight: [TasteAxis: Double]
-    var rejected: [AxisVector]
+    var mean: [Double]
+    var covariance: [Double]
+    var groups: [String: GroupValue]
+    var ratingMean: Double
+    var ratingSD: Double
+    var likeThreshold: Double
+    var effectiveCount: Double
     var ratedCount: Int
+    var rejected: [[Double]]
 
-    static let empty = TasteState(mean: [:], weight: [:], rejected: [], ratedCount: 0)
-}
+    static let empty = TasteEngine.rebuild(events: [], now: Date(timeIntervalSince1970: 0))
 
-nonisolated enum TasteSignal: Equatable, Sendable {
-    case rating(Int)
-    case like
-    case superlike
-    case dislike
-}
-
-nonisolated enum PortraitConfidence: Equatable, Sendable {
-    case thin
-    case forming
-    case steady
-
-    static func resolve(_ state: TasteState) -> PortraitConfidence {
-        if state.ratedCount < 4 { return .thin }
-        let strong = state.weight.values.filter { $0 >= 1.2 }.count
-        if state.ratedCount >= 8 && strong >= 4 { return .steady }
-        return .forming
+    func group(_ group: GenreGroup) -> GroupValue {
+        groups[group.rawValue] ?? GroupValue(point: 0.5, lower: 0, upper: 1, effective: 0)
     }
 
-    var sentence: String {
-        switch self {
-        case .thin: "Портрет ещё тонкий"
-        case .forming: "Портрет складывается"
-        case .steady: "Портрет устойчивый"
-        }
+    var groupValues: [GenreGroup: GroupValue] {
+        Dictionary(uniqueKeysWithValues: GenreGroup.allCases.map { ($0, group($0)) })
     }
-
-    var thinCaption: String { "портрет ещё тонкий" }
 }
 
 nonisolated struct MatchScore: Equatable, Sendable {
-    var percent: Int
-    var sharedAxes: Int
-    var portrait: PortraitConfidence
+    var probability: Double
+    var lower: Double
+    var upper: Double
+    var isConfident: Bool
+
+    var percent: Int { Int((probability * 100).rounded()) }
 }
 
-nonisolated enum HideRule {
-    static let window: TimeInterval = 21 * 24 * 60 * 60
+nonisolated enum TasteParameters {
+    static let ratingPriorMean = 0.65
+    static let ratingPriorSD = 0.20
+    static let ratingMeanStrength = 3.0
+    static let ratingVarianceStrength = 5.0
+    static let ratingSDFloor = 0.05
+    static let likeAnchor = 0.55
+    static let utilityClip = 2.5
+    static let noiseSD = 1.0
+    static let halfLifeDays = 365.0
 
-    static func isSuppressed(hiddenAt: Date, matchAtHide: Int, now: Date, currentMatch: Int) -> Bool {
-        let matured = now.timeIntervalSince(hiddenAt) >= window
-        let grew = currentMatch >= matchAtHide + 15
-        return !matured && !grew
-    }
+    static let onboardingRateWeight = 0.8
+    static let onboardingLoveWeight = 0.6
+    static let onboardingLoveUtility = 1.0
+    static let onboardingDecayRatings = 10.0
+    static let planLaterWeight = 0.25
+    static let planLaterUtility = 0.5
+    static let watchedUnratedWeight = 0.15
+    static let watchedUnratedUtility = 0.3
+    static let notInterestedWeight = 0.35
+    static let notInterestedUtility = -1.0
+
+    static let interceptPriorSD = 1.0
+    static let linearPriorSD = 0.8
+    static let quadraticPriorSD = 0.8
+    static let groupPriorSD = 0.7
+    static let axisNoiseSD = 0.15
+
+    static let qualityWeight = 0.3
+    static let qualityStrength = 5.0
+    static let qualityVotePrior = 300.0
+    static let qualityMean = 6.5
+    static let qualityScale = 1.0
+
+    static let credibleZ = 1.2816
+    static let diagramStep = 0.15
+    static let diagramWideWidth = 0.6
+    static let diagramMinEffective = 2.0
+    static let confidentEffective = 3.0
+    static let confidentWidth = 0.4
+
+    static let rejectedMemory = 50
+    static let rejectPenalty = 0.2
+    static let diversityPenalty = 0.15
 }
 
 nonisolated enum TasteEngine {
-    static let confidentWeight = 0.8
-    private static let likeScale = 0.05
-    private static let superlikeScale = 0.10
+    static let axisOrder = TasteAxis.allCases
+    static let groupOrder = GenreGroup.allCases
+    static let dimension = 1 + 2 * axisOrder.count + groupOrder.count
 
-    static func apply(signal: TasteSignal, film: [TasteAxis: Double], to state: TasteState) -> TasteState {
-        var state = state
-        let film = clamp(film)
-        switch signal {
-        case .rating(let raw):
-            let score = min(10, max(0, raw))
-            switch score {
-            case 7...10:
-                pull(film, strength: strength(ofRating: score), into: &state)
-            case 0...3:
-                state.rejected.append(AxisVector(components: film, weight: 1))
-            default:
-                break
+    static func linearIndex(_ axis: Int) -> Int { 1 + axis }
+    static func quadraticIndex(_ axis: Int) -> Int { 1 + axisOrder.count + axis }
+    static func groupIndex(_ group: Int) -> Int { 1 + 2 * axisOrder.count + group }
+
+    // MARK: Признаки
+
+    static func encode(axes: [TasteAxis: Double], genreIDs: [Int]) -> [Double] {
+        var phi = [Double](repeating: 0, count: dimension)
+        phi[0] = 1
+        for (index, axis) in axisOrder.enumerated() {
+            guard let raw = axes[axis], raw.isFinite else { continue }
+            let x = min(1, max(0, raw)) - 0.5
+            phi[linearIndex(index)] = 2 * x
+            phi[quadraticIndex(index)] = 4 * x * x - 1.0 / 3.0
+        }
+        let shares = GenreGroup.shares(for: genreIDs)
+        for (index, group) in groupOrder.enumerated() {
+            phi[groupIndex(index)] = shares[group] ?? 0
+        }
+        return phi
+    }
+
+    // MARK: Журнал
+
+    static func ordered(_ events: [TasteEvent]) -> [TasteEvent] {
+        events.sorted { lhs, rhs in
+            if lhs.at != rhs.at { return lhs.at < rhs.at }
+            return lhs.sequence < rhs.sequence
+        }
+    }
+
+    /// Одно событие на фильм после последнего reset: последняя оценка, иначе последнее прочее событие.
+    static func effective(_ events: [TasteEvent]) -> [TasteEvent] {
+        let sorted = ordered(events)
+        let start = (sorted.lastIndex { $0.kind == .reset }).map { $0 + 1 } ?? 0
+        var rating: [Int: TasteEvent] = [:]
+        var other: [Int: TasteEvent] = [:]
+        for event in sorted[start...] {
+            switch event.kind {
+            case .rate, .onboardingRate:
+                guard let value = event.value, (1...100).contains(value) else { continue }
+                rating[event.tmdbID] = event
+            case .removeMovie:
+                rating[event.tmdbID] = nil
+                other[event.tmdbID] = nil
+            case .reset:
+                continue
+            case .onboardingLove, .planLater, .notInterested, .watchedUnrated:
+                other[event.tmdbID] = event
             }
-            state.ratedCount += 1
-        case .like:
-            pull(film, strength: strength(ofRating: 8) * likeScale, into: &state)
-        case .superlike:
-            pull(film, strength: strength(ofRating: 8) * superlikeScale, into: &state)
-        case .dislike:
-            state.rejected.append(AxisVector(components: film, weight: 0.35))
+        }
+        var result = Array(rating.values)
+        for (id, event) in other where rating[id] == nil {
+            result.append(event)
+        }
+        return ordered(result)
+    }
+
+    struct Observation {
+        var event: TasteEvent
+        var phi: [Double]
+        var utility: Double
+        var weight: Double
+    }
+
+    struct Normalization: Equatable {
+        var mean: Double
+        var sd: Double
+        var threshold: Double
+        var rated: Int
+    }
+
+    static func decay(_ at: Date, now: Date) -> Double {
+        let days = max(0, now.timeIntervalSince(at)) / 86_400
+        return pow(2, -days / TasteParameters.halfLifeDays)
+    }
+
+    static func normalization(_ effective: [TasteEvent], now: Date) -> Normalization {
+        typealias P = TasteParameters
+        let ratings = effective.filter { $0.kind == .rate || $0.kind == .onboardingRate }
+        var total = 0.0
+        var sum = 0.0
+        for event in ratings {
+            let w = decay(event.at, now: now)
+            total += w
+            sum += w * Double(event.value ?? 50) / 100
+        }
+        let mean = (P.ratingMeanStrength * P.ratingPriorMean + sum) / (P.ratingMeanStrength + total)
+        var squares = 0.0
+        for event in ratings {
+            let x = Double(event.value ?? 50) / 100
+            squares += decay(event.at, now: now) * (x - mean) * (x - mean)
+        }
+        let variance = (P.ratingVarianceStrength * P.ratingPriorSD * P.ratingPriorSD + squares)
+            / (P.ratingVarianceStrength + total)
+        let sd = max(P.ratingSDFloor, variance.squareRoot())
+        return Normalization(mean: mean, sd: sd, threshold: (mean + P.likeAnchor) / 2, rated: ratings.count)
+    }
+
+    static func utility(rating: Int, normalization: Normalization) -> Double {
+        let x = Double(rating) / 100
+        let u = (x - normalization.threshold) / normalization.sd
+        return min(TasteParameters.utilityClip, max(-TasteParameters.utilityClip, u))
+    }
+
+    static func observations(_ events: [TasteEvent], now: Date) -> ([Observation], Normalization) {
+        typealias P = TasteParameters
+        let effective = effective(events)
+        let norm = normalization(effective, now: now)
+        let observations = effective.map { event -> Observation in
+            let phi = encode(axes: event.axes, genreIDs: event.genreIDs)
+            let time = decay(event.at, now: now)
+            let utility: Double
+            let base: Double
+            switch event.kind {
+            case .rate:
+                utility = self.utility(rating: event.value ?? 50, normalization: norm)
+                base = 1
+            case .onboardingRate:
+                utility = self.utility(rating: event.value ?? 50, normalization: norm)
+                base = P.onboardingRateWeight
+            case .onboardingLove:
+                utility = P.onboardingLoveUtility
+                base = P.onboardingLoveWeight * P.onboardingDecayRatings / (P.onboardingDecayRatings + Double(norm.rated))
+            case .planLater:
+                utility = P.planLaterUtility
+                base = P.planLaterWeight
+            case .watchedUnrated:
+                utility = P.watchedUnratedUtility
+                base = P.watchedUnratedWeight
+            case .notInterested:
+                utility = P.notInterestedUtility
+                base = P.notInterestedWeight
+            case .removeMovie, .reset:
+                utility = 0
+                base = 0
+            }
+            return Observation(event: event, phi: phi, utility: utility, weight: base * time)
+        }
+        return (observations, norm)
+    }
+
+    // MARK: Апостериор
+
+    static func priorSD(_ index: Int) -> Double {
+        typealias P = TasteParameters
+        if index == 0 { return P.interceptPriorSD }
+        if index <= axisOrder.count { return P.linearPriorSD }
+        if index <= 2 * axisOrder.count { return P.quadraticPriorSD }
+        return P.groupPriorSD
+    }
+
+    struct Posterior {
+        var mean: [Double]
+        var covariance: [Double]
+    }
+
+    static func posterior(_ observations: [Observation]) -> Posterior {
+        let n = dimension
+        let noise = TasteParameters.noiseSD * TasteParameters.noiseSD
+        var precision = [Double](repeating: 0, count: n * n)
+        var b = [Double](repeating: 0, count: n)
+        for i in 0..<n {
+            let sd = priorSD(i)
+            precision[i * n + i] = 1 / (sd * sd)
+        }
+        for observation in observations where observation.weight > 0 {
+            let c = observation.weight / noise
+            let phi = observation.phi
+            let active = phi.indices.filter { phi[$0] != 0 }
+            for i in active {
+                b[i] += c * observation.utility * phi[i]
+                let scaled = c * phi[i]
+                for j in active {
+                    precision[i * n + j] += scaled * phi[j]
+                }
+            }
+        }
+        let l = TasteMath.cholesky(precision, size: n)
+        return Posterior(
+            mean: TasteMath.solve(cholesky: l, size: n, b),
+            covariance: TasteMath.inverse(cholesky: l, size: n)
+        )
+    }
+
+    static func groupValue(_ index: Int, posterior: Posterior, observations: [Observation]) -> GroupValue {
+        let n = dimension
+        let g = groupIndex(index)
+        let mu = posterior.mean[0] + posterior.mean[g]
+        let c = posterior.covariance
+        let s = max(0, c[0] + 2 * c[g] + c[g * n + g]).squareRoot()
+        let sigma = TasteParameters.noiseSD
+        let z = TasteParameters.credibleZ
+        let effective = observations.reduce(0.0) { $0 + $1.weight * $1.phi[g] }
+        return GroupValue(
+            point: TasteMath.normalCDF(mu / sigma),
+            lower: TasteMath.normalCDF((mu - z * s) / sigma),
+            upper: TasteMath.normalCDF((mu + z * s) / sigma),
+            effective: effective
+        )
+    }
+
+    // MARK: Пересчёт
+
+    /// Профиль — детерминированная функция журнала и момента пересчёта.
+    static func rebuild(events: [TasteEvent], now: Date) -> TasteState {
+        let sorted = ordered(events)
+        var state = raw(sorted, now: now)
+        guard let last = sorted.last, last.kind != .reset, last.kind != .removeMovie else { return state }
+        let previous = raw(Array(sorted.dropLast()), now: now)
+        let step = TasteParameters.diagramStep
+        for group in groupOrder {
+            var value = state.group(group)
+            let before = previous.group(group).point
+            let shown = before + min(step, max(-step, value.point - before))
+            value.point = shown
+            value.lower = min(value.lower, shown)
+            value.upper = max(value.upper, shown)
+            state.groups[group.rawValue] = value
         }
         return state
     }
 
-    static func match(user: TasteState, film: [TasteAxis: Double]) -> MatchScore {
-        let portrait = PortraitConfidence.resolve(user)
-        let film = clamp(film)
-        let shared = film.keys.filter { user.mean[$0] != nil }
-        guard !shared.isEmpty else {
-            return MatchScore(percent: 0, sharedAxes: 0, portrait: portrait)
+    static func raw(_ events: [TasteEvent], now: Date) -> TasteState {
+        let (observations, norm) = observations(events, now: now)
+        let posterior = posterior(observations)
+        var groups: [String: GroupValue] = [:]
+        for (index, group) in groupOrder.enumerated() {
+            groups[group.rawValue] = groupValue(index, posterior: posterior, observations: observations)
         }
-        let distance = shared.reduce(0.0) { partial, axis in
-            partial + abs((user.mean[axis] ?? 0) - (film[axis] ?? 0))
-        }
-        let similarity = 1 - distance / Double(shared.count)
-        var percent = (similarity - rejectionPenalty(user: user, film: film)) * 100
-        if shared.count < 3 {
-            percent *= 0.62
-        }
-        if user.ratedCount < 4 {
-            percent *= Double(max(user.ratedCount, 0)) / 4
-        }
-        if percent < 0 { percent = 0 }
-        let cap: Double = portrait == .thin ? 74 : 99
-        if percent > cap { percent = cap }
-        return MatchScore(percent: Int(percent.rounded()), sharedAxes: shared.count, portrait: portrait)
+        let rejected = observations
+            .filter { $0.event.kind == .notInterested }
+            .suffix(TasteParameters.rejectedMemory)
+            .map(\.phi)
+        return TasteState(
+            mean: posterior.mean,
+            covariance: posterior.covariance,
+            groups: groups,
+            ratingMean: norm.mean,
+            ratingSD: norm.sd,
+            likeThreshold: norm.threshold,
+            effectiveCount: observations.reduce(0) { $0 + $1.weight },
+            ratedCount: norm.rated,
+            rejected: Array(rejected)
+        )
     }
 
-    private static func strength(ofRating score: Int) -> Double {
-        Double(abs(score - 5)) / 5
+    // MARK: Совпадение
+
+    static func qualityOffset(_ film: FilmFeatures, effectiveCount: Double) -> Double {
+        typealias P = TasteParameters
+        guard let average = film.voteAverage, let count = film.voteCount, count > 0, average.isFinite else { return 0 }
+        let votes = Double(count)
+        let bayes = (votes * average + P.qualityVotePrior * P.qualityMean) / (votes + P.qualityVotePrior)
+        let centered = min(2, max(-2, (bayes - P.qualityMean) / P.qualityScale))
+        return P.qualityWeight * P.qualityStrength / (P.qualityStrength + effectiveCount) * centered
     }
 
-    private static func pull(_ film: [TasteAxis: Double], strength: Double, into state: inout TasteState) {
-        guard strength > 0 else { return }
-        let step = 0.35 * strength
-        for (axis, value) in film {
-            let weight = state.weight[axis] ?? 0
-            if weight == 0 {
-                state.mean[axis] = value
-                state.weight[axis] = strength
+    /// Латентная полезность фильма: среднее и дисперсия (апостериор + шум разметки осей).
+    static func latent(user: TasteState, film: FilmFeatures) -> (mean: Double, variance: Double) {
+        let n = dimension
+        guard user.mean.count == n, user.covariance.count == n * n else { return (0, 1) }
+        let phi = encode(axes: film.axes, genreIDs: film.genreIDs)
+        let m = user.mean
+        let c = user.covariance
+        var mean = TasteMath.dot(m, phi) + qualityOffset(film, effectiveCount: user.effectiveCount)
+        var variance = TasteMath.quadratic(c, size: n, phi)
+        let noise = TasteParameters.axisNoiseSD * TasteParameters.axisNoiseSD
+        for (index, axis) in axisOrder.enumerated() {
+            let li = linearIndex(index)
+            let qi = quadraticIndex(index)
+            if let raw = film.axes[axis], raw.isFinite {
+                let x = min(1, max(0, raw)) - 0.5
+                let gradient = 2 * m[li] + 8 * x * m[qi]
+                variance += gradient * gradient * noise
             } else {
-                let alpha = min(1, step / (1 + weight))
-                let previous = state.mean[axis] ?? value
-                state.mean[axis] = previous + (value - previous) * alpha
-                state.weight[axis] = weight + strength
+                variance += m[li] * m[li] / 3 + m[qi] * m[qi] * 4 / 45
             }
         }
+        if !mean.isFinite { mean = 0 }
+        return (mean, max(0, variance.isFinite ? variance : 1))
     }
 
-    private static func rejectionPenalty(user: TasteState, film: [TasteAxis: Double]) -> Double {
-        var penalty = 0.0
-        for rejected in user.rejected {
-            let keys = rejected.components.keys.filter { film[$0] != nil }
-            guard keys.count >= 2 else { continue }
-            let distance = keys.reduce(0.0) { partial, axis in
-                partial + abs((rejected.components[axis] ?? 0) - (film[axis] ?? 0))
+    static func match(user: TasteState, film: FilmFeatures) -> MatchScore {
+        typealias P = TasteParameters
+        let (mean, variance) = latent(user: user, film: film)
+        let sigma = P.noiseSD
+        let spread = variance.squareRoot()
+        let probability = TasteMath.normalCDF(mean / (sigma * sigma + variance).squareRoot())
+        let lower = TasteMath.normalCDF((mean - P.credibleZ * spread) / sigma)
+        let upper = TasteMath.normalCDF((mean + P.credibleZ * spread) / sigma)
+        let confident = user.effectiveCount >= P.confidentEffective && upper - lower <= P.confidentWidth
+        return MatchScore(probability: probability, lower: lower, upper: upper, isConfident: confident)
+    }
+
+    // MARK: Ранжирование
+
+    private static func similarity(_ a: [Double], _ b: [Double]) -> Double {
+        var dot = 0.0
+        var na = 0.0
+        var nb = 0.0
+        for i in 1..<min(a.count, b.count) {
+            let isQuadratic = i > axisOrder.count && i <= 2 * axisOrder.count
+            if isQuadratic { continue }
+            dot += a[i] * b[i]
+            na += a[i] * a[i]
+            nb += b[i] * b[i]
+        }
+        guard na > 1e-9, nb > 1e-9 else { return 0 }
+        return dot / (na * nb).squareRoot()
+    }
+
+    /// Thompson-сэмпл + штраф за близость к отвергнутому + MMR. Возвращает id в порядке показа.
+    static func rank(_ films: [(id: Int, features: FilmFeatures)], user: TasteState, seed: Int) -> [Int] {
+        typealias P = TasteParameters
+        let candidates = films.map { film -> (id: Int, phi: [Double], score: Double) in
+            let phi = encode(axes: film.features.axes, genreIDs: film.features.genreIDs)
+            let (mean, variance) = latent(user: user, film: film.features)
+            let key = UInt64(bitPattern: Int64(film.id)) &* 0x9E37_79B9 ^ UInt64(bitPattern: Int64(seed))
+            let sample = mean + variance.squareRoot() * TasteMath.gaussian(seed: key)
+            let rejected = user.rejected.map { similarity(phi, $0) }.max() ?? 0
+            let score = TasteMath.normalCDF(sample / P.noiseSD) - P.rejectPenalty * max(0, rejected)
+            return (film.id, phi, score)
+        }
+        var remaining = candidates
+        var picked: [(id: Int, phi: [Double], score: Double)] = []
+        while !remaining.isEmpty {
+            var bestIndex = 0
+            var bestValue = -Double.infinity
+            for (index, candidate) in remaining.enumerated() {
+                let near = picked.map { similarity(candidate.phi, $0.phi) }.max() ?? 0
+                let value = candidate.score - P.diversityPenalty * max(0, near)
+                if value > bestValue || (value == bestValue && candidate.id < remaining[bestIndex].id) {
+                    bestValue = value
+                    bestIndex = index
+                }
             }
-            let proximity = max(0, 1 - distance / Double(keys.count))
-            penalty += proximity * rejected.weight * 0.15
+            picked.append(remaining.remove(at: bestIndex))
         }
-        return min(0.35, penalty)
+        return picked.map(\.id)
+    }
+}
+
+/// Повторный показ «не интересно»: вероятность, что отказ ещё в силе, затухает с периодом 60 дней.
+nonisolated enum HideRule {
+    static let initialRefusal = 0.9
+    static let halfLifeDays = 60.0
+    static let offerThreshold = 0.35
+
+    static func refusal(hiddenAt: Date, now: Date) -> Double {
+        let days = max(0, now.timeIntervalSince(hiddenAt)) / 86_400
+        return initialRefusal * pow(2, -days / halfLifeDays)
     }
 
-    private static func clamp(_ film: [TasteAxis: Double]) -> [TasteAxis: Double] {
-        var result: [TasteAxis: Double] = [:]
-        for (axis, value) in film where value.isFinite {
-            result[axis] = min(1, max(0, value))
-        }
-        return result
+    static func isSuppressed(hiddenAt: Date, now: Date, currentProbability: Double) -> Bool {
+        (1 - refusal(hiddenAt: hiddenAt, now: now)) * currentProbability < offerThreshold
     }
 }
 

@@ -9,16 +9,6 @@ import Testing
 
 private let listedIDs = [28, 12, 37, 35, 10751, 18, 10749, 878, 14, 53, 27, 9648, 80, 16, 36, 10752, 99, 10402, 10770]
 
-private func item(_ genres: [Int], superliked: Bool = false) -> LibrarySnapshot.Item {
-    LibrarySnapshot.Item(
-        genreIDs: genres,
-        userRating: nil,
-        reviewText: "",
-        status: superliked ? .superlike : .idea,
-        superlikedAt: superliked ? .now : nil
-    )
-}
-
 @Test func genreGroup_everyListedIDBelongsToExactlyOneGroup() {
     for id in listedIDs {
         let owners = GenreGroup.allCases.filter { $0.genreIDs.contains(id) }
@@ -28,20 +18,17 @@ private func item(_ genres: [Int], superliked: Bool = false) -> LibrarySnapshot.
     #expect(all.count == listedIDs.count)
 }
 
-@Test func genreGroup_multiGenreFilmCountsOncePerGroup() {
-    // Триллер + криминал + драма: одна запись в «Триллеры и ужасы», одна в «Драмы».
-    let snapshot = LibrarySnapshot(items: [item([53, 80, 18]), item([18])])
-    let shares = GenreGroup.shares(in: snapshot)
-    #expect(shares[.drama] == 1)
-    #expect(shares[.suspense] == 0.5)
+@Test func genreGroup_multiGenreFilmSplitsByShare() {
+    // Триллер + криминал + драма: 2/3 в «Триллеры и ужасы», 1/3 в «Драмы».
+    let shares = GenreGroup.shares(for: [53, 80, 18])
+    #expect(abs((shares[.suspense] ?? 0) - 2.0 / 3.0) < 1e-9)
+    #expect(abs((shares[.drama] ?? 0) - 1.0 / 3.0) < 1e-9)
     #expect(shares[.action] == nil)
+    #expect(abs(shares.values.reduce(0, +) - 1) < 1e-9)
 }
 
-@Test func genreGroup_sharesAreNormalizedAndSuperlikeWeighsDouble() {
-    let snapshot = LibrarySnapshot(items: [item([28], superliked: true), item([35]), item([16]), item([99999])])
-    let shares = GenreGroup.shares(in: snapshot)
-    #expect(shares[.action] == 1)
-    #expect(shares[.comedy] == 0.5)
-    #expect(shares.values.allSatisfy { (0...1).contains($0) })
-    #expect(GenreGroup.shares(in: LibrarySnapshot(items: [])).isEmpty)
+@Test func genreGroup_unknownGenresGiveNoShares() {
+    #expect(GenreGroup.shares(for: []).isEmpty)
+    #expect(GenreGroup.shares(for: [99999]).isEmpty)
+    #expect(GenreGroup.shares(for: [28, 99999]) == [.action: 1])
 }

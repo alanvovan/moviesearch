@@ -25,7 +25,7 @@ struct TrailerSheet: View {
                    let url = URL(string: "https://www.youtube.com/watch?v=\(videoKey)") {
                     Link("Открыть в YouTube", destination: url)
                         .font(.footnote.weight(.semibold))
-                        .foregroundStyle(.white.opacity(0.8))
+                        .foregroundStyle(MovieMatchPalette.textSecondary)
                 }
             }
             .frame(maxHeight: .infinity, alignment: .center)
@@ -43,8 +43,7 @@ struct TrailerSheet: View {
                 }
             }
         }
-        .presentationBackground(MovieMatchPalette.background)
-        .preferredColorScheme(.dark)
+        .movieMatchSheet()
         .task { await load() }
     }
 
@@ -55,11 +54,10 @@ struct TrailerSheet: View {
         } else if failed {
             Text("Трейлер не найден")
                 .font(.headline)
-                .foregroundStyle(.white)
+                .foregroundStyle(MovieMatchPalette.textPrimary)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
             ProgressView()
-                .tint(.white)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }

@@ -8,26 +8,20 @@ import SwiftUI
 
 struct AccountView: View {
     @Environment(\.modelContext) private var modelContext
-    @Query(sort: \StoredMovie.savedAt, order: .reverse) private var movies: [StoredMovie]
+    @Query private var movies: [StoredMovie]
     @Query private var tastes: [StoredTaste]
     @State private var confirmReset = false
 
     private var taste: TasteState { tastes.first?.state ?? .empty }
-    private var portrait: PortraitConfidence { PortraitConfidence.resolve(taste) }
-    private static let minimumMoviesForRadar = 3
-    private var snapshot: LibrarySnapshot { LibraryStore.snapshot(of: movies) }
-    private var genreShares: [GenreGroup: Double] { GenreGroup.shares(in: snapshot) }
-    private var awards: Set<AwardID> {
-        AwardEvaluator.unlocked(in: snapshot)
-    }
+    private var watchedCount: Int { movies.filter { $0.status.isWatched }.count }
+    private var reviewCount: Int { movies.filter { $0.userRating != nil }.count }
 
     var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(alignment: .leading, spacing: 22) {
+                VStack(alignment: .leading, spacing: 26) {
                     stats
                     spider
-                    awardsBlock
                     settings
                 }
                 .padding(20)
@@ -41,59 +35,57 @@ struct AccountView: View {
                 }
             }
             .confirmationDialog(
-                "Сбросить вкус?",
+                "Сбросить вкус",
                 isPresented: $confirmReset,
                 titleVisibility: .visible
             ) {
-                Button("Сбросить", role: .destructive) {
-                    LibraryStore.resetTaste(in: modelContext)
+                Button("Удалить библиотеку и обнулить диаграмму", role: .destructive) {
+                    LibraryStore.resetTaste(deleteLibrary: true, in: modelContext)
+                }
+                Button("Сохранить библиотеку и обнулить диаграмму", role: .destructive) {
+                    LibraryStore.resetTaste(deleteLibrary: false, in: modelContext)
                 }
                 Button("Отмена", role: .cancel) {}
             } message: {
-                Text("Портрет обнулится. Фильмы и отзывы останутся.")
+                Text("Удаление стирает фильмы, оценки и отзывы. Если сохранить библиотеку, фильмы останутся, а диаграмму будут менять только новые отзывы.")
             }
         }
     }
 
     private var stats: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Оценено: \(taste.ratedCount)")
-                .font(.title2.weight(.semibold))
-            Text(portrait.sentence)
-                .font(.body)
-                .foregroundStyle(.white.opacity(0.75))
+        HStack(spacing: 12) {
+            metric(value: watchedCount, title: "Просмотрено", symbol: "eye.fill")
+            metric(value: reviewCount, title: "Оставлено отзывов", symbol: "star.bubble.fill")
         }
-        .foregroundStyle(.white)
+    }
+
+    private func metric(value: Int, title: String, symbol: String) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Image(systemName: symbol)
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(MovieMatchPalette.textSecondary)
+                .accessibilityHidden(true)
+            Text("\(value)")
+                .font(.system(size: 34, weight: .bold, design: .rounded))
+                .monospacedDigit()
+            Text(title)
+                .font(.subheadline)
+                .foregroundStyle(MovieMatchPalette.textSecondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(16)
+        .background(MovieMatchPalette.surface, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .accessibilityElement(children: .combine)
     }
 
     private var spider: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Любимые жанры")
                 .font(.title3.weight(.semibold))
-                .foregroundStyle(.white)
-            if movies.count < Self.minimumMoviesForRadar || genreShares.isEmpty {
-                Text("Пока мало данных: сохраните несколько фильмов")
-                    .foregroundStyle(.white.opacity(0.75))
-            } else {
-                GenreRadarView(values: genreShares)
-            }
-        }
-    }
-
-    private var awardsBlock: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Награды")
-                .font(.title3.weight(.semibold))
-                .foregroundStyle(.white)
-            ForEach(AwardID.allCases, id: \.self) { award in
-                HStack(spacing: 10) {
-                    Image(systemName: awards.contains(award) ? "checkmark.circle.fill" : "circle")
-                        .foregroundStyle(.white)
-                    Text(award.title)
-                        .foregroundStyle(.white.opacity(awards.contains(award) ? 1 : 0.45))
-                    Spacer()
-                }
-            }
+            GenreRadarView(values: taste.groupValues)
+            Text("Радиус — вероятность, что вам понравится типичный фильм группы. Полоса — разброс оценки, полые точки — данных пока мало.")
+                .font(.footnote)
+                .foregroundStyle(MovieMatchPalette.textSecondary)
         }
     }
 
@@ -101,18 +93,30 @@ struct AccountView: View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Настройки")
                 .font(.title3.weight(.semibold))
-                .foregroundStyle(.white)
             NavigationLink(value: AccountRoute.hidden) {
-                Text("Скрытые дизлайки")
-                    .font(.body.weight(.semibold))
-                    .foregroundStyle(.black)
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 12)
-                    .background(.white, in: Capsule())
-            }
-            Button("Сбросить вкус") { confirmReset = true }
+                HStack {
+                    Text("Скрытые дизлайки")
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .foregroundStyle(MovieMatchPalette.textTertiary)
+                }
                 .font(.body.weight(.semibold))
-                .foregroundStyle(.white)
+                .foregroundStyle(MovieMatchPalette.textPrimary)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 14)
+                .background(MovieMatchPalette.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            }
+            Button {
+                confirmReset = true
+            } label: {
+                Text("Сбросить вкус")
+                    .font(.body.weight(.semibold))
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 14)
+                    .background(MovieMatchPalette.destructive, in: Capsule())
+            }
+            .buttonStyle(MovieMatchIconStyle())
         }
     }
 }
@@ -130,33 +134,33 @@ private struct HiddenMoviesView: View {
             if hides.isEmpty {
                 MovieMatchMessage(title: "Скрытых фильмов нет")
             } else {
-                ScrollView {
-                    LazyVStack(spacing: 12) {
-                        ForEach(hides, id: \.tmdbID) { hide in
-                            HStack(spacing: 12) {
-                                PosterImage(path: hide.posterPath, size: "w342")
-                                    .frame(width: 44, height: 66)
-                                    .clipShape(RoundedRectangle(cornerRadius: 8))
-                                VStack(alignment: .leading, spacing: 4) {
-                                    Text(hide.title)
-                                        .foregroundStyle(.white)
-                                    Text(russianDate(hide.hiddenAt))
-                                        .font(.caption)
-                                        .foregroundStyle(.white.opacity(0.6))
-                                }
-                                Spacer()
-                                Button("Вернуть") {
-                                    LibraryStore.unhide(hide.tmdbID, in: modelContext)
-                                }
-                                .font(.caption.weight(.semibold))
-                                .padding(.horizontal, 12)
-                                .padding(.vertical, 8)
-                                .buttonStyle(MovieMatchCapsuleStyle())
+                List {
+                    ForEach(hides, id: \.tmdbID) { hide in
+                        HStack(spacing: 12) {
+                            PosterImage(path: hide.posterPath, size: "w342")
+                                .frame(width: 44, height: 66)
+                                .clipShape(RoundedRectangle(cornerRadius: 8))
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(hide.title)
+                                Text(russianDate(hide.hiddenAt))
+                                    .font(.caption)
+                                    .foregroundStyle(MovieMatchPalette.textSecondary)
                             }
+                            Spacer()
+                            Button("Вернуть") {
+                                LibraryStore.unhide(hide.tmdbID, in: modelContext)
+                            }
+                            .font(.caption.weight(.semibold))
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 8)
+                            .buttonStyle(MovieMatchCapsuleStyle())
                         }
+                        .listRowBackground(Color.clear)
+                        .listRowSeparatorTint(MovieMatchPalette.separator)
                     }
-                    .padding(16)
                 }
+                .listStyle(.plain)
+                .scrollContentBackground(.hidden)
             }
         }
         .movieMatchScreen()

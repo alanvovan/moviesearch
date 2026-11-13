@@ -80,6 +80,10 @@ final class StoredMovie {
     var hasReview: Bool {
         !reviewText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
+
+    var features: FilmFeatures {
+        FilmFeatures(axes: axes, genreIDs: genreIDs)
+    }
 }
 
 @Model
@@ -93,6 +97,40 @@ final class StoredTaste {
     var state: TasteState {
         get { (try? JSONDecoder().decode(TasteState.self, from: blob)) ?? .empty }
         set { blob = (try? JSONEncoder().encode(newValue)) ?? blob }
+    }
+}
+
+@Model
+final class StoredEvent {
+    var kindRaw: String
+    var tmdbID: Int
+    var value: Int?
+    var at: Date
+    var sequence: Int
+    var axisBlob: Data
+    var genreIDs: [Int]
+
+    init(_ event: TasteEvent) {
+        self.kindRaw = event.kind.rawValue
+        self.tmdbID = event.tmdbID
+        self.value = event.value
+        self.at = event.at
+        self.sequence = event.sequence
+        self.axisBlob = AxisCoding.encode(event.axes)
+        self.genreIDs = event.genreIDs
+    }
+
+    var event: TasteEvent? {
+        guard let kind = TasteEventKind(rawValue: kindRaw) else { return nil }
+        return TasteEvent(
+            kind: kind,
+            tmdbID: tmdbID,
+            value: value,
+            at: at,
+            sequence: sequence,
+            axes: AxisCoding.decode(axisBlob),
+            genreIDs: genreIDs
+        )
     }
 }
 

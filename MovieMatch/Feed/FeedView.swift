@@ -10,21 +10,15 @@ import SwiftUI
 @Observable
 final class FeedModel {
     var queue: [TMDBMovie] = []
-    var position: Int?
     var isLoading = false
     var banner: String?
     var missingKey = false
     var actionTick = 0
-    var isRefreshing = false
-    var refreshNote: String?
-    var refreshNoteTick = 0
 
     private var client: TMDBClient?
     private var loadToken = 0
     private var cursor = 0
     private var shown: Set<Int> = []
-    private var recentSkips: [Int] = []
-    private var handled: Set<Int> = []
     private var detailAttempts: Set<Int> = []
     private var prepared = false
 
@@ -37,89 +31,24 @@ final class FeedModel {
                 Task { await TMDBGenreCatalog.shared.loadIfNeeded(client: client) }
             }
         }
-        await loadMore(context: context, fill: true)
+        await loadMore(context: context, target: 6)
     }
 
-    func refresh(context: ModelContext) async {
-        guard !missingKey, client != nil, !isRefreshing else { return }
+    func reload(context: ModelContext) async {
+        guard !missingKey, client != nil else { return }
         loadToken += 1
-        let token = loadToken
-        isRefreshing = true
-        refreshNote = nil
-        defer {
-            if token == loadToken {
-                isRefreshing = false
-            }
-        }
-
-        remember(queue)
-        var localCursor = cursor
-        var excluded = shown
-        var collected: [TMDBMovie] = []
-        var emptyStreak = 0
-        let ceiling = max(cursor + 24, 15)
-        do {
-            while collected.count < 6 && emptyStreak < 5 && localCursor < ceiling {
-                guard token == loadToken, let client else { return }
-                let page = try await fetch(at: localCursor, client: client)
-                guard token == loadToken else { return }
-                localCursor += 1
-                let fresh = offerable(page, context: context, seen: excluded)
-                if fresh.isEmpty {
-                    emptyStreak += 1
-                } else {
-                    emptyStreak = 0
-                    collected.append(contentsOf: fresh)
-                    excluded.formUnion(fresh.map(\.id))
-                }
-            }
-            guard token == loadToken else { return }
-            guard !collected.isEmpty else {
-                if queue.isEmpty {
-                    banner = "Лента пустая"
-                }
-                return
-            }
-            cursor = localCursor
-            shown = excluded
-            recentSkips.removeAll()
-            handled.removeAll()
-            detailAttempts.removeAll()
-            banner = nil
-            var transaction = Transaction()
-            transaction.disablesAnimations = true
-            withTransaction(transaction) {
-                queue = collected
-                position = collected.first?.id
-            }
-            if let position {
-                await prefetch(position)
-            }
-        } catch is CancellationError {
-            return
-        } catch let error as TMDBError {
-            guard token == loadToken else { return }
-            noteRefreshFailure(error.userMessage)
-        } catch {
-            guard token == loadToken else { return }
-            noteRefreshFailure(TMDBError.badStatus(0).userMessage)
-        }
+        isLoading = false
+        banner = nil
+        if cursor >= 40 { cursor = 0 }
+        await loadMore(context: context, target: 6)
     }
 
     func present(_ movie: TMDBMovie) {
         banner = nil
-        refreshNote = nil
-        if queue.contains(where: { $0.id == movie.id }) {
-            position = movie.id
-            return
-        }
-        var transaction = Transaction()
-        transaction.disablesAnimations = true
-        withTransaction(transaction) {
-            queue.insert(movie, at: 0)
-            position = movie.id
-        }
-        remember([movie])
+        queue.removeAll { $0.id == movie.id }
+        queue.insert(movie, at: 0)
+        shown.insert(movie.id)
+        Task { await prefetchTop() }
     }
 
     func suggestions(matching raw: String) async throws -> [TMDBMovie] {
@@ -136,115 +65,78 @@ final class FeedModel {
         return result
     }
 
-    private func noteRefreshFailure(_ message: String) {
-        if queue.isEmpty {
-            banner = message
-            refreshNote = nil
-            return
-        }
-        refreshNote = message
-        refreshNoteTick += 1
+    func notInterested(_ movie: TMDBMovie, context: ModelContext) {
+        LibraryStore.notInterested(movie, in: context)
+        advance(past: movie.id, context: context)
     }
 
-    func loadMoreIfNeeded(current: Int, context: ModelContext) async {
-        guard let index = queue.firstIndex(where: { $0.id == current }) else { return }
-        guard index >= queue.count - 3 else { return }
-        await loadMore(context: context, fill: false)
+    func planLater(_ movie: TMDBMovie, context: ModelContext) {
+        LibraryStore.planLater(movie, in: context)
+        advance(past: movie.id, context: context)
     }
 
-    func prefetch(_ id: Int) async {
-        guard let client else { return }
-        await enrich(id, client: client)
-        if let index = queue.firstIndex(where: { $0.id == id }), index + 1 < queue.count {
-            await enrich(queue[index + 1].id, client: client)
-        }
+    func watched(_ movie: TMDBMovie, rating: Int?, review: String, context: ModelContext) {
+        LibraryStore.markWatched(movie, rating: rating, review: review, in: context)
+        advance(past: movie.id, context: context)
     }
 
-    func noteScroll(from old: Int?, to new: Int?) {
-        guard let old, let new, old != new else { return }
-        if handled.contains(old) {
-            handled.remove(old)
-            return
-        }
-        guard
-            let oldIndex = queue.firstIndex(where: { $0.id == old }),
-            let newIndex = queue.firstIndex(where: { $0.id == new }),
-            newIndex > oldIndex
-        else { return }
-        recentSkips.removeAll { $0 == old }
-        recentSkips.append(old)
-        if recentSkips.count > 12 {
-            recentSkips.removeFirst()
-        }
-    }
-
-    func like(_ movie: TMDBMovie, isSuper: Bool, context: ModelContext) {
-        handled.insert(movie.id)
-        LibraryStore.like(movie, isSuper: isSuper, in: context)
-        removeAndAdvance(movie.id)
-        actionTick += 1
-    }
-
-    func dislike(_ movie: TMDBMovie, context: ModelContext) {
-        handled.insert(movie.id)
-        LibraryStore.dislike(movie, in: context)
-        removeAndAdvance(movie.id)
-        actionTick += 1
-    }
-
-    private func removeAndAdvance(_ id: Int) {
-        let next = queue.drop(while: { $0.id != id }).dropFirst().first?.id
+    private func advance(past id: Int, context: ModelContext) {
         queue.removeAll { $0.id == id }
-        recentSkips.removeAll { $0 == id }
-        position = next ?? queue.first?.id
+        actionTick += 1
+        Task {
+            await prefetchTop()
+            if queue.count < 4 {
+                await loadMore(context: context, target: 4)
+            }
+        }
     }
 
-    private func loadMore(context: ModelContext, fill: Bool) async {
+    func prefetchTop() async {
+        guard let client else { return }
+        for movie in queue.prefix(2) {
+            await enrich(movie.id, client: client)
+        }
+    }
+
+    private func loadMore(context: ModelContext, target: Int) async {
         let token = loadToken
-        guard !isLoading, !isRefreshing, let client, !missingKey, cursor < 40 else { return }
+        guard !isLoading, let client, !missingKey, cursor < 40 else {
+            if queue.isEmpty, cursor >= 40 { banner = "Лента закончилась" }
+            return
+        }
         isLoading = true
         defer { isLoading = false }
-        let target = fill ? 6 : 1
         var added = 0
         var emptyStreak = 0
-        var localCursor = cursor
         do {
-            while added < target && emptyStreak < 3 && localCursor < 40 {
+            while added < target && emptyStreak < 3 && cursor < 40 {
+                let page = try await fetch(at: cursor, client: client)
                 guard token == loadToken else { return }
-                let page = try await fetch(at: localCursor, client: client)
-                guard token == loadToken else { return }
-                localCursor += 1
-                cursor = localCursor
+                cursor += 1
                 let fresh = offerable(page, context: context)
                 if fresh.isEmpty {
                     emptyStreak += 1
                 } else {
                     emptyStreak = 0
                     queue.append(contentsOf: fresh)
-                    remember(fresh)
+                    shown.formUnion(fresh.map(\.id))
                     added += fresh.count
                 }
             }
-            guard token == loadToken else { return }
-            if position == nil {
-                position = queue.first?.id
-            }
             if added > 0 {
                 banner = nil
-            } else if queue.isEmpty && banner == nil {
+            } else if queue.isEmpty {
                 banner = "Лента пустая"
             }
-            if let position {
-                await prefetch(position)
-            }
+            await prefetchTop()
         } catch is CancellationError {
             return
         } catch let error as TMDBError {
             guard token == loadToken else { return }
-            banner = error.userMessage
+            if queue.isEmpty { banner = error.userMessage }
         } catch {
             guard token == loadToken else { return }
-            banner = TMDBError.badStatus(0).userMessage
+            if queue.isEmpty { banner = TMDBError.badStatus(0).userMessage }
         }
     }
 
@@ -258,30 +150,19 @@ final class FeedModel {
         }
     }
 
-    private func offerable(
-        _ page: [TMDBMovie],
-        context: ModelContext,
-        seen preset: Set<Int>? = nil,
-        includeSkipped: Bool = false
-    ) -> [TMDBMovie] {
+    /// Убирает уже сохранённые и ещё скрытые фильмы, остальное упорядочивает по MATH_SPEC.md, 6.3.
+    private func offerable(_ page: [TMDBMovie], context: ModelContext) -> [TMDBMovie] {
         let stored = (try? context.fetch(FetchDescriptor<StoredMovie>())) ?? []
         let hides = (try? context.fetch(FetchDescriptor<StoredHide>())) ?? []
         let taste = LibraryStore.taste(in: context)
         let blocked = Set(stored.map(\.tmdbID))
-        var seen = preset ?? Set(queue.map(\.id))
+        var seen = shown.union(queue.map(\.id))
         var result: [TMDBMovie] = []
         for movie in page {
-            guard seen.insert(movie.id).inserted else { continue }
-            if blocked.contains(movie.id) { continue }
-            if !includeSkipped, recentSkips.contains(movie.id) { continue }
+            guard seen.insert(movie.id).inserted, !blocked.contains(movie.id) else { continue }
             if let hide = hides.first(where: { $0.tmdbID == movie.id }) {
-                let percent = TasteEngine.match(user: taste, film: movie.tasteAxes).percent
-                if HideRule.isSuppressed(
-                    hiddenAt: hide.hiddenAt,
-                    matchAtHide: hide.matchAtHide,
-                    now: .now,
-                    currentMatch: percent
-                ) {
+                let probability = TasteEngine.match(user: taste, film: movie.features).probability
+                if HideRule.isSuppressed(hiddenAt: hide.hiddenAt, now: .now, currentProbability: probability) {
                     continue
                 }
                 context.delete(hide)
@@ -289,17 +170,15 @@ final class FeedModel {
             }
             result.append(movie)
         }
-        return result
-    }
-
-    private func remember(_ movies: [TMDBMovie]) {
-        shown.formUnion(movies.map(\.id))
+        let day = Int(Date.now.timeIntervalSince1970 / 86_400)
+        let order = TasteEngine.rank(result.map { ($0.id, $0.features) }, user: taste, seed: day)
+        let byID = Dictionary(uniqueKeysWithValues: result.map { ($0.id, $0) })
+        return order.compactMap { byID[$0] }
     }
 
     private func enrich(_ id: Int, client: TMDBClient) async {
         guard let index = queue.firstIndex(where: { $0.id == id }), !queue[index].enriched else { return }
-        if detailAttempts.contains(id) { return }
-        detailAttempts.insert(id)
+        guard detailAttempts.insert(id).inserted else { return }
         do {
             let detail = try await client.details(id: id)
             if let index = queue.firstIndex(where: { $0.id == id }) {
@@ -321,152 +200,284 @@ struct FeedView: View {
     }
 }
 
+private enum SwipeAction {
+    case notInterested
+    case planLater
+}
+
+private enum Swipe {
+    static let threshold: CGFloat = 110
+    static let velocity: CGFloat = 700
+    static let flyDistance: CGFloat = 640
+}
+
 private struct FeedScreen: View {
     @Bindable var model: FeedModel
     @Environment(\.modelContext) private var modelContext
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Query private var tastes: [StoredTaste]
-    @State private var trailer: TrailerRequest?
-    @State private var showIdeas = false
     @State private var searchText = ""
     @State private var suggestions: [TMDBMovie] = []
     @State private var suggestionNote: String?
     @State private var isSuggesting = false
-    @State private var pull: CGFloat = 0
-    @State private var pullTick = 0
+    @State private var dragX: CGFloat = 0
+    @State private var isFlying = false
+    @State private var watchedTarget: TMDBMovie?
+    @State private var expanded = false
+    @Namespace private var cardSpace
     @FocusState private var searchFocused: Bool
 
     private var taste: TasteState { tastes.first?.state ?? .empty }
-
-    private var isAtTop: Bool {
-        guard let first = model.queue.first?.id else { return false }
-        return model.position == first
-    }
-
-    private var showSuggestionPanel: Bool {
-        !suggestions.isEmpty || suggestionNote != nil
-    }
-
-    private var suggestionHeight: CGFloat {
-        let note: CGFloat = suggestionNote != nil && suggestions.isEmpty ? 52 : 0
-        return min(320, note + CGFloat(suggestions.count) * 64)
-    }
+    private var showSuggestionPanel: Bool { !suggestions.isEmpty || suggestionNote != nil }
+    private var pastThreshold: Bool { abs(dragX) >= Swipe.threshold }
 
     var body: some View {
         ZStack(alignment: .top) {
-            content
+            VStack(spacing: 14) {
+                Color.clear.frame(height: model.missingKey ? 0 : 52)
+                content
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                if !model.queue.isEmpty {
+                    actionBar
+                        .opacity(expanded ? 0 : 1)
+                        .allowsHitTesting(!expanded)
+                        .accessibilityHidden(expanded)
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.bottom, 10)
             if !model.missingKey && (searchFocused || showSuggestionPanel) {
-                Color.black.opacity(showSuggestionPanel ? 0.42 : 0.001)
+                MovieMatchPalette.scrim
+                    .opacity(showSuggestionPanel ? 1 : 0.01)
                     .ignoresSafeArea()
                     .onTapGesture(perform: tapOutsideSearch)
             }
-            if !model.missingKey {
+            if expanded, let movie = model.queue.first {
+                detailLayer(movie)
+                    .transition(.identity)
+            } else if !model.missingKey {
                 searchChrome
             }
         }
         .movieMatchScreen()
-        .sensoryFeedback(.impact(weight: .light, intensity: 0.7), trigger: model.actionTick)
-        .sensoryFeedback(.impact(weight: .light, intensity: 0.8), trigger: pullTick)
+        .toolbarVisibility(expanded ? .hidden : .automatic, for: .tabBar)
+        .sensoryFeedback(.impact(weight: .medium, intensity: 0.8), trigger: model.actionTick)
+        .sensoryFeedback(.selection, trigger: pastThreshold)
         .task { await model.prepareAndLoad(context: modelContext) }
         .task(id: searchText) { await updateSuggestions() }
-        .task(id: model.refreshNoteTick) {
-            guard model.refreshNote != nil else { return }
-            try? await Task.sleep(for: .seconds(2.6))
-            guard !Task.isCancelled else { return }
-            model.refreshNote = nil
-        }
-        .onChange(of: pull) { old, new in
-            if old < FeedPull.distance && new >= FeedPull.distance {
-                pullTick += 1
+        .sheet(item: $watchedTarget) { movie in
+            RatingSheet(
+                title: movie.title,
+                requiresRating: false,
+                allowsUnrated: true,
+                rating: nil,
+                review: ""
+            ) { rating, review in
+                withAnimation(reduceMotion ? nil : .snappy(duration: 0.3)) {
+                    expanded = false
+                    model.watched(movie, rating: rating, review: review, context: modelContext)
+                }
             }
-        }
-        .sheet(isPresented: $showIdeas) { IdeasSheet() }
-        .fullScreenCover(item: $trailer) { request in
-            TrailerSheet(movieID: request.id, initialKey: request.videoKey)
         }
     }
 
+    // MARK: Колода
+
+    @ViewBuilder
+    private var content: some View {
+        if model.missingKey {
+            MovieMatchMessage(title: "Нужен ключ TMDB", subtitle: "Лента пустая, пока ключ не задан для сборки.")
+        } else if model.queue.isEmpty {
+            if model.isLoading {
+                ProgressView()
+            } else {
+                MovieMatchMessage(
+                    title: model.banner ?? "Лента пустая",
+                    subtitle: "Можно попробовать загрузить ещё раз.",
+                    actionTitle: "Повторить",
+                    action: { Task { await model.reload(context: modelContext) } }
+                )
+            }
+        } else {
+            deck
+        }
+    }
+
+    private var deck: some View {
+        let visible = Array(model.queue.prefix(2).enumerated())
+        return ZStack {
+            ForEach(visible.reversed(), id: \.element.id) { index, movie in
+                card(movie, isTop: index == 0)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func card(_ movie: TMDBMovie, isTop: Bool) -> some View {
+        let progress = min(1, abs(dragX) / Swipe.threshold)
+        SwipeCard(movie: movie, taste: taste, dragX: isTop ? dragX : 0)
+            .opacity(isTop && expanded ? 0 : 1)
+            .animation(nil, value: expanded)
+            .matchedGeometryEffect(id: isTop ? "card" : "next", in: cardSpace, isSource: isTop && !expanded)
+            .onTapGesture {
+                guard isTop, !isFlying, abs(dragX) < 4 else { return }
+                withAnimation(reduceMotion ? nil : .spring(duration: 0.45, bounce: 0.12)) { expanded = true }
+            }
+            .scaleEffect(isTop ? 1 : 0.94 + 0.06 * progress)
+            .offset(y: isTop ? 0 : 14 * (1 - progress))
+            .offset(x: isTop ? dragX : 0, y: isTop ? abs(dragX) * 0.05 : 0)
+            .rotationEffect(.degrees(isTop && !reduceMotion ? Double(dragX / 22).clamped(to: -12...12) : 0), anchor: .bottom)
+            .allowsHitTesting(isTop && !isFlying)
+            .gesture(
+                HorizontalPan(enabled: isTop && !isFlying) { translation in
+                    dragX = translation
+                } onEnded: { translation, velocity in
+                    finishDrag(movie, translation: translation, velocity: velocity)
+                }
+            )
+            .accessibilityAction(named: "Не интересно") { commit(.notInterested) }
+            .accessibilityAction(named: "Посмотреть позже") { commit(.planLater) }
+            .transition(.asymmetric(insertion: .identity, removal: .opacity))
+            .zIndex(isTop ? 1 : 0)
+    }
+
+    /// Детальный просмотр: карточка на весь экран, действия только кнопками поверх.
+    private func detailLayer(_ movie: TMDBMovie) -> some View {
+        ZStack(alignment: .bottom) {
+            ScrollView {
+                MovieDetailView(movie: movie, taste: taste, bottomInset: 150)
+            }
+            .scrollIndicators(.hidden)
+            .background(MovieMatchPalette.background)
+            .ignoresSafeArea()
+            .overlay(alignment: .topTrailing) {
+                Button {
+                    withAnimation(reduceMotion ? nil : .spring(duration: 0.4, bounce: 0.1)) { expanded = false }
+                } label: {
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 15, weight: .bold))
+                        .foregroundStyle(MovieMatchPalette.textPrimary)
+                        .frame(width: 38, height: 38)
+                        .background(.ultraThinMaterial, in: Circle())
+                }
+                .buttonStyle(MovieMatchIconStyle())
+                .padding(14)
+                .accessibilityLabel("Свернуть")
+            }
+            actionBar
+                .padding(.top, 24)
+                .padding(.bottom, 8)
+                .frame(maxWidth: .infinity)
+                .background(alignment: .bottom) {
+                    LinearGradient(
+                        colors: [MovieMatchPalette.background.opacity(0), MovieMatchPalette.background.opacity(0.95)],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                    .ignoresSafeArea()
+                    .allowsHitTesting(false)
+                }
+        }
+        .matchedGeometryEffect(id: "card", in: cardSpace, isSource: expanded)
+    }
+
+    private var actionBar: some View {
+        HStack(spacing: 28) {
+            actionButton("xmark", label: "Не интересно", size: 58) { commit(.notInterested) }
+            actionButton("eye.fill", label: "Просмотрено", size: 72) {
+                if let movie = model.queue.first { watchedTarget = movie }
+            }
+            actionButton("bookmark.fill", label: "Посмотреть позже", size: 58) { commit(.planLater) }
+        }
+        .frame(maxWidth: .infinity)
+        .disabled(isFlying)
+    }
+
+    private func actionButton(_ symbol: String, label: String, size: CGFloat, action: @escaping () -> Void) -> some View {
+        let family = model.queue.first.map { FilmAxisHeuristic.profile(FilmSignals(movie: $0)).family } ?? .drama
+        return Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: size * 0.38, weight: .semibold))
+                .foregroundStyle(MovieMatchPalette.onAccent)
+                .frame(width: size, height: size)
+                .background(MovieMatchPalette.actionFill(for: family), in: Circle())
+                .shadow(color: .black.opacity(0.22), radius: 10, y: 5)
+        }
+        .buttonStyle(MovieMatchIconStyle())
+        .accessibilityLabel(label)
+    }
+
+    private func finishDrag(_ movie: TMDBMovie, translation: CGFloat, velocity: CGFloat) {
+        let projected = translation + velocity * 0.15
+        if abs(translation) >= Swipe.threshold || abs(velocity) >= Swipe.velocity && abs(projected) >= Swipe.threshold {
+            commit(projected > 0 ? .planLater : .notInterested)
+        } else {
+            withAnimation(reduceMotion ? .easeOut(duration: 0.15) : .spring(duration: 0.4, bounce: 0.3)) {
+                dragX = 0
+            }
+        }
+    }
+
+    private func commit(_ action: SwipeAction) {
+        guard let movie = model.queue.first, !isFlying else { return }
+        isFlying = true
+        let perform = {
+            expanded = false
+            switch action {
+            case .notInterested: model.notInterested(movie, context: modelContext)
+            case .planLater: model.planLater(movie, context: modelContext)
+            }
+        }
+        if reduceMotion || expanded {
+            withAnimation(.easeOut(duration: 0.2)) { perform() }
+            dragX = 0
+            isFlying = false
+            return
+        }
+        let target = action == .planLater ? Swipe.flyDistance : -Swipe.flyDistance
+        withAnimation(.easeIn(duration: 0.22)) {
+            dragX = target
+        } completion: {
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            withTransaction(transaction) {
+                perform()
+                dragX = 0
+            }
+            isFlying = false
+        }
+    }
+
+    // MARK: Поиск
+
     private var searchChrome: some View {
         VStack(spacing: 8) {
-            HStack(spacing: 8) {
-                searchField
-                ideasButton
-            }
-            if pull > FeedPull.reveal || model.isRefreshing {
-                FeedRefreshCue(pull: pull, isRefreshing: model.isRefreshing)
-                    .allowsHitTesting(false)
-            } else if let note = model.refreshNote, suggestions.isEmpty {
-                Text(note)
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                    .background(.ultraThinMaterial, in: Capsule())
-                    .allowsHitTesting(false)
+            MovieMatchSearchField(
+                prompt: "Название фильма",
+                text: $searchText,
+                focus: $searchFocused,
+                onSubmit: pickFirstSuggestion
+            ) {
+                if isSuggesting {
+                    ProgressView().controlSize(.small)
+                }
             }
             if showSuggestionPanel {
                 suggestionPanel
             }
         }
         .padding(.horizontal, 16)
-        .padding(.top, 8)
-    }
-
-    private var searchField: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "magnifyingglass")
-                .foregroundStyle(.white.opacity(0.72))
-                .accessibilityHidden(true)
-            TextField("Название фильма", text: $searchText)
-                .focused($searchFocused)
-                .accessibilityLabel("Поиск фильма")
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
-                .submitLabel(.search)
-                .tint(.white)
-                .onSubmit(pickFirstSuggestion)
-            if isSuggesting {
-                ProgressView()
-                    .controlSize(.small)
-                    .tint(.white)
-            } else if !searchText.isEmpty {
-                Button(action: clearSearch) {
-                    Image(systemName: "xmark.circle.fill")
-                        .foregroundStyle(.white.opacity(0.65))
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Очистить поиск")
-            }
-        }
-        .font(.system(size: 16, weight: .medium))
-        .foregroundStyle(.white)
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
-        .frame(maxWidth: .infinity)
-        .background(.white.opacity(0.12), in: Capsule())
-        .overlay(Capsule().stroke(.white.opacity(0.18), lineWidth: 1))
-    }
-
-    private var ideasButton: some View {
-        Button {
-            searchFocused = false
-            showIdeas = true
-        } label: {
-            Text("Идеи")
-                .font(.system(size: 15, weight: .semibold))
-                .padding(.horizontal, 16)
-                .padding(.vertical, 10)
-        }
-        .buttonStyle(MovieMatchCapsuleStyle())
+        .padding(.top, 4)
     }
 
     private var suggestionPanel: some View {
-        ScrollView {
+        let note: CGFloat = suggestionNote != nil && suggestions.isEmpty ? 52 : 0
+        return ScrollView {
             LazyVStack(spacing: 0) {
                 if let suggestionNote, suggestions.isEmpty {
                     Text(suggestionNote)
                         .font(.subheadline.weight(.medium))
-                        .foregroundStyle(.white.opacity(0.78))
+                        .foregroundStyle(MovieMatchPalette.textSecondary)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.horizontal, 14)
                         .padding(.vertical, 16)
@@ -481,12 +492,12 @@ private struct FeedScreen: View {
                 }
             }
         }
-        .frame(height: suggestionHeight)
+        .frame(height: min(320, note + CGFloat(suggestions.count) * 64))
         .scrollIndicators(.hidden)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .stroke(.white.opacity(0.16), lineWidth: 1)
+                .stroke(MovieMatchPalette.stroke, lineWidth: 1)
         }
     }
 
@@ -494,18 +505,17 @@ private struct FeedScreen: View {
         HStack(spacing: 10) {
             PosterImage(path: movie.posterPath, size: "w185")
                 .frame(width: 32, height: 48)
-                .background(.white.opacity(0.08))
                 .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
                 Text(movie.title)
                     .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(MovieMatchPalette.textPrimary)
                     .lineLimit(1)
                 if let year = movie.releaseYear {
                     Text(String(year))
                         .font(.caption)
-                        .foregroundStyle(.white.opacity(0.62))
+                        .foregroundStyle(MovieMatchPalette.textSecondary)
                 }
             }
             Spacer(minLength: 0)
@@ -514,96 +524,8 @@ private struct FeedScreen: View {
         .padding(.vertical, 8)
         .contentShape(Rectangle())
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(suggestionLabel(movie))
+        .accessibilityLabel(movie.releaseYear.map { "\(movie.title), \($0)" } ?? movie.title)
         .accessibilityAddTraits(.isButton)
-    }
-
-    @ViewBuilder
-    private var content: some View {
-        if model.missingKey {
-            MovieMatchMessage(
-                title: "Нужен ключ TMDB",
-                subtitle: "Лента пустая, пока ключ не задан для сборки."
-            )
-        } else if model.queue.isEmpty {
-            if model.isLoading && !model.isRefreshing {
-                ProgressView().tint(.white)
-            } else {
-                emptyFeed
-            }
-        } else {
-            pager
-        }
-    }
-
-    private var emptyFeed: some View {
-        GeometryReader { proxy in
-            ScrollView {
-                MovieMatchMessage(
-                    title: model.banner ?? "Лента пустая",
-                    subtitle: "Потяните вниз, чтобы обновить.",
-                    actionTitle: "Повторить",
-                    action: { Task { await reloadFeed() } }
-                )
-                .padding(.horizontal, 24)
-                .frame(width: proxy.size.width, height: proxy.size.height)
-            }
-            .scrollBounceBehavior(.always, axes: .vertical)
-            .scrollIndicators(.hidden)
-            .refreshable { await reloadFeed() }
-        }
-    }
-
-    private var pager: some View {
-        GeometryReader { proxy in
-            pagerScroll(insets: proxy.safeAreaInsets)
-        }
-    }
-
-    private func pagerScroll(insets: EdgeInsets) -> some View {
-        ScrollView(.vertical) {
-            LazyVStack(spacing: 0) {
-                ForEach(model.queue) { movie in
-                    FeedCard(
-                        movie: movie,
-                        taste: taste,
-                        insets: insets,
-                        onTrailer: {
-                            var transaction = Transaction()
-                            transaction.disablesAnimations = true
-                            withTransaction(transaction) {
-                                trailer = TrailerRequest(id: movie.id, videoKey: movie.youtubeKey)
-                            }
-                        },
-                        onDislike: { model.dislike(movie, context: modelContext) },
-                        onLike: { model.like(movie, isSuper: false, context: modelContext) },
-                        onSuperlike: { model.like(movie, isSuper: true, context: modelContext) }
-                    )
-                    .containerRelativeFrame(.vertical) { length, _ in length }
-                    .id(movie.id)
-                }
-            }
-            .scrollTargetLayout()
-        }
-        .scrollTargetBehavior(.paging)
-        .scrollBounceBehavior(.always, axes: .vertical)
-        .scrollPosition(id: $model.position)
-        .scrollIndicators(.hidden)
-        .scrollDismissesKeyboard(.interactively)
-        .scrollDisabled(searchFocused || showSuggestionPanel)
-        .ignoresSafeArea()
-        .refreshable { await reloadFeed() }
-        .feedPullToRefresh(enabled: isAtTop && !searchFocused && !showSuggestionPanel, isRefreshing: model.isRefreshing, pull: $pull) {
-            await reloadFeed()
-        }
-        .onChange(of: model.position) { old, new in
-            model.noteScroll(from: old, to: new)
-            guard let new else { return }
-            Task {
-                await model.prefetch(new)
-                await model.loadMoreIfNeeded(current: new, context: modelContext)
-            }
-        }
     }
 
     private func updateSuggestions() async {
@@ -620,11 +542,9 @@ private struct FeedScreen: View {
         } catch {
             return
         }
-        guard !Task.isCancelled else { return }
         do {
             let found = try await model.suggestions(matching: trimmed)
-            guard !Task.isCancelled else { return }
-            guard searchText.trimmingCharacters(in: .whitespacesAndNewlines) == trimmed else { return }
+            guard !Task.isCancelled, searchText.trimmingCharacters(in: .whitespacesAndNewlines) == trimmed else { return }
             suggestions = found
             suggestionNote = found.isEmpty ? "Ничего не найдено" : nil
             isSuggesting = false
@@ -644,22 +564,13 @@ private struct FeedScreen: View {
         suggestions = []
         suggestionNote = nil
         isSuggesting = false
-        Task { @MainActor in
-            model.present(movie)
-            await model.prefetch(movie.id)
-        }
+        dragX = 0
+        model.present(movie)
     }
 
     private func pickFirstSuggestion() {
         guard let movie = suggestions.first else { return }
         choose(movie)
-    }
-
-    private func clearSearch() {
-        searchText = ""
-        suggestions = []
-        suggestionNote = nil
-        searchFocused = true
     }
 
     private func tapOutsideSearch() {
@@ -670,608 +581,188 @@ private struct FeedScreen: View {
         suggestions = []
         suggestionNote = nil
     }
-
-    private func suggestionLabel(_ movie: TMDBMovie) -> String {
-        if let year = movie.releaseYear {
-            return "\(movie.title), \(year)"
-        }
-        return movie.title
-    }
-
-    private func reloadFeed() async {
-        searchFocused = false
-        await model.refresh(context: modelContext)
-    }
 }
 
-private enum FeedPull {
-    static let distance: CGFloat = 88
-    static let reveal: CGFloat = 20
-}
-
-private struct FeedRefreshCue: View {
-    var pull: CGFloat
-    var isRefreshing: Bool
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
-    private var ready: Bool { pull >= FeedPull.distance }
-
-    var body: some View {
-        HStack(spacing: 8) {
-            if isRefreshing {
-                ProgressView()
-                    .controlSize(.small)
-                    .tint(.white)
-                Text("Обновляем")
-            } else {
-                Image(systemName: "arrow.down")
-                    .rotationEffect(.degrees(!reduceMotion && ready ? 180 : 0))
-                Text(ready ? "Отпустите, чтобы обновить" : "Потяните, чтобы обновить")
-            }
-        }
-        .font(.system(size: 13, weight: .semibold))
-        .foregroundStyle(.white)
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(.ultraThinMaterial, in: Capsule())
-        .overlay(Capsule().stroke(.white.opacity(0.16), lineWidth: 1))
-        .opacity(isRefreshing ? 1 : min(1, pull / 36))
-        .accessibilityElement(children: .combine)
-    }
-}
-
-private struct FeedPullRefreshModifier: ViewModifier {
-    var enabled: Bool
-    var isRefreshing: Bool
-    @Binding var pull: CGFloat
-    var onRefresh: () async -> Void
-
-    @State private var gestureOpen = false
-    @State private var startedAtTop = false
-
-    func body(content: Content) -> some View {
-        content.simultaneousGesture(pullGesture)
-    }
-
-    private var pullGesture: some Gesture {
-        DragGesture(minimumDistance: 18, coordinateSpace: .local)
-            .onChanged { value in
-                let dy = value.translation.height
-                let dx = abs(value.translation.width)
-                if !gestureOpen || (abs(dy) < 24 && dx < 24) {
-                    gestureOpen = true
-                    startedAtTop = enabled && !isRefreshing && dy > 0
-                }
-                guard startedAtTop, !isRefreshing else { return }
-                pull = dy > dx ? max(0, dy) : 0
-            }
-            .onEnded { value in
-                let dy = value.translation.height
-                let shouldRefresh = startedAtTop
-                    && !isRefreshing
-                    && dy >= FeedPull.distance
-                    && dy > abs(value.translation.width)
-                gestureOpen = false
-                startedAtTop = false
-                pull = 0
-                guard shouldRefresh else { return }
-                Task { await onRefresh() }
-            }
-    }
-}
-
-extension View {
-    fileprivate func feedPullToRefresh(
-        enabled: Bool,
-        isRefreshing: Bool,
-        pull: Binding<CGFloat>,
-        onRefresh: @escaping () async -> Void
-    ) -> some View {
-        modifier(
-            FeedPullRefreshModifier(
-                enabled: enabled,
-                isRefreshing: isRefreshing,
-                pull: pull,
-                onRefresh: onRefresh
-            )
-        )
-    }
-}
-
-private struct TrailerRequest: Identifiable {
-    var id: Int
-    var videoKey: String?
-}
-
-private enum CardSection: String, CaseIterable, Identifiable {
-    case overview = "Обзор"
-    case cast = "В ролях"
-    case tags = "Теги"
-    case awards = "Награды"
-
-    var id: String { rawValue }
-}
-
-private struct FeedCard: View {
+/// Карточка колоды: крупный постер, краткие данные и метки свайпа. Подробности открываются по нажатию.
+private struct SwipeCard: View {
     var movie: TMDBMovie
     var taste: TasteState
-    var insets: EdgeInsets
-    var onTrailer: () -> Void
-    var onDislike: () -> Void
-    var onLike: () -> Void
-    var onSuperlike: () -> Void
-
-    @State private var section: CardSection = .overview
-
-    private static let maxTags = 12
-
-    var body: some View {
-        let profile = FilmAxisHeuristic.profile(FilmSignals(movie: movie))
-        let accent = MovieMatchPalette.accent(for: profile.family)
-        let score = TasteEngine.match(user: taste, film: profile.axes)
-        VStack(alignment: .leading, spacing: 14) {
-            header(profile: profile, accent: accent, score: score)
-            if let tagline = cleaned(movie.tagline) {
-                Text("«\(tagline)»")
-                    .font(.system(size: 17, design: .serif).italic())
-                    .foregroundStyle(.white.opacity(0.86))
-                    .lineLimit(2)
-            }
-            trailerButton(accent: accent)
-            Picker("Раздел", selection: $section) {
-                ForEach(CardSection.allCases) { Text($0.rawValue).tag($0) }
-            }
-            .pickerStyle(.segmented)
-            sectionContent(accent: accent)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                .clipped()
-            HStack(spacing: 18) {
-                icon("xmark", "Не нравится", accent, onDislike)
-                icon("heart", "В идеи", accent, onLike)
-                icon("flame", "Суперлайк", accent, onSuperlike)
-            }
-            .frame(maxWidth: .infinity)
-        }
-        .padding(.horizontal, 18)
-        .padding(.top, insets.top + 76)
-        .padding(.bottom, insets.bottom + 12)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background { backdrop(accent: accent) }
-    }
-
-    private func backdrop(accent: Color) -> some View {
-        ZStack {
-            MovieMatchPalette.background
-            if movie.backdropPath != nil || movie.posterPath != nil {
-                PosterImage(path: movie.backdropPath ?? movie.posterPath, size: "w1280")
-            } else {
-                LinearGradient(colors: [accent.opacity(0.62), accent.opacity(0.14)], startPoint: .top, endPoint: .bottom)
-            }
-            LinearGradient(
-                colors: [
-                    MovieMatchPalette.background.opacity(0.55),
-                    MovieMatchPalette.background.opacity(0.78),
-                    MovieMatchPalette.background.opacity(0.97),
-                ],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-        }
-        .ignoresSafeArea()
-        .allowsHitTesting(false)
-    }
-
-    private func header(profile: FilmProfile, accent: Color, score: MatchScore) -> some View {
-        HStack(alignment: .top, spacing: 14) {
-            PosterImage(path: movie.posterPath, size: "w342")
-                .frame(width: 96, height: 144)
-                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .stroke(.white.opacity(0.18), lineWidth: 1)
-                }
-            VStack(alignment: .leading, spacing: 8) {
-                Text(movie.title)
-                    .font(.system(size: 26, weight: .bold, design: profile.family.usesSerif ? .serif : .rounded))
-                    .foregroundStyle(.white)
-                    .lineLimit(2)
-                    .minimumScaleFactor(0.7)
-                if let subtitle = subtitleLine {
-                    Text(subtitle)
-                        .font(.subheadline)
-                        .foregroundStyle(.white.opacity(0.72))
-                }
-                HStack(spacing: 10) {
-                    if let rating = ratingPercent {
-                        RatingBadge(percent: rating)
-                    }
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Совпадение \(score.percent)%")
-                            .font(.system(size: 17, weight: .semibold))
-                            .foregroundStyle(accent)
-                        if score.portrait == .thin {
-                            Text(score.portrait.thinCaption)
-                                .font(.caption)
-                                .foregroundStyle(.white.opacity(0.6))
-                                .lineLimit(2)
-                        }
-                    }
-                }
-                genreChips
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-    }
-
-    private var genreChips: some View {
-        let catalog = TMDBGenreCatalog.shared
-        let names = movie.genreIDs.prefix(3).map { capitalized(catalog.name(for: $0)) }
-        return HStack(spacing: 6) {
-            ForEach(names, id: \.self) { name in
-                Text(name)
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.white)
-                    .lineLimit(1)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(.white.opacity(0.14), in: Capsule())
-            }
-        }
-    }
-
-    private func trailerButton(accent: Color) -> some View {
-        Button(action: onTrailer) {
-            Label("Смотреть трейлер", systemImage: "play.fill")
-                .font(.system(size: 16, weight: .semibold))
-                .foregroundStyle(.black)
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 12)
-                .background(.white, in: Capsule())
-        }
-        .buttonStyle(MovieMatchIconStyle())
-        .accessibilityLabel("Смотреть трейлер")
-    }
-
-    @ViewBuilder
-    private func sectionContent(accent: Color) -> some View {
-        if !movie.enriched && section != .overview {
-            ProgressView()
-                .tint(.white)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else {
-            switch section {
-            case .overview: overview
-            case .cast: castList
-            case .tags: tags
-            case .awards: placeholder("Нет данных о наградах и номинациях")
-            }
-        }
-    }
-
-    private var overview: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            ForEach(facts, id: \.label) { fact in
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    Text(fact.label)
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.white.opacity(0.55))
-                        .frame(width: 84, alignment: .leading)
-                    Text(fact.value)
-                        .font(.subheadline)
-                        .foregroundStyle(.white)
-                        .lineLimit(1)
-                }
-            }
-            Text(displayOverview(movie.overview))
-                .font(.subheadline)
-                .foregroundStyle(.white.opacity(0.82))
-                .frame(maxHeight: .infinity, alignment: .topLeading)
-        }
-    }
-
-    @ViewBuilder
-    private var castList: some View {
-        if movie.cast.isEmpty {
-            placeholder("Актёры не указаны")
-        } else {
-            ScrollView(.horizontal) {
-                HStack(alignment: .top, spacing: 10) {
-                    ForEach(movie.cast, id: \.self) { member in
-                        VStack(alignment: .leading, spacing: 4) {
-                            PosterImage(path: member.profilePath, size: "w185")
-                                .frame(width: 88, height: 118)
-                                .background(.white.opacity(0.08))
-                                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                            Text(member.name)
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(.white)
-                                .lineLimit(2)
-                            if let character = member.character {
-                                Text(character)
-                                    .font(.caption2)
-                                    .foregroundStyle(.white.opacity(0.6))
-                                    .lineLimit(1)
-                            }
-                        }
-                        .frame(width: 88, alignment: .leading)
-                    }
-                }
-            }
-            .scrollIndicators(.hidden)
-        }
-    }
-
-    @ViewBuilder
-    private var tags: some View {
-        let keywords = movie.keywords.prefix(Self.maxTags).map { $0 }
-        if keywords.isEmpty {
-            placeholder("Тегов нет")
-        } else {
-            ChipFlow(spacing: 6) {
-                ForEach(keywords, id: \.self) { keyword in
-                    Text(keyword)
-                        .font(.caption.weight(.medium))
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 6)
-                        .background(.white.opacity(0.12), in: Capsule())
-                }
-            }
-        }
-    }
-
-    private func placeholder(_ text: String) -> some View {
-        Text(text)
-            .font(.subheadline)
-            .foregroundStyle(.white.opacity(0.6))
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-
-    private var subtitleLine: String? {
-        var parts: [String] = []
-        if let year = movie.releaseYear { parts.append(String(year)) }
-        if let runtime = movie.runtime, runtime > 0 { parts.append(runtimeText(runtime)) }
-        if let certification = cleaned(movie.certification) { parts.append(certification) }
-        return parts.isEmpty ? nil : parts.joined(separator: " · ")
-    }
+    var dragX: CGFloat
 
     private var ratingPercent: Int? {
         guard let average = movie.voteAverage, average > 0 else { return nil }
         return Int((average * 10).rounded())
     }
 
-    private var facts: [(label: String, value: String)] {
-        var rows: [(label: String, value: String)] = []
-        let countries = movie.productionCountries.filter { !$0.isEmpty }
-        if !countries.isEmpty { rows.append(("Страна", countries.prefix(2).joined(separator: ", "))) }
-        if let director = cleaned(movie.director) { rows.append(("Режиссёр", director)) }
-        if let original = cleaned(movie.originalTitle),
-           original.caseInsensitiveCompare(movie.title) != .orderedSame {
-            rows.append(("Оригинал", original))
+    private var tagline: String? {
+        let trimmed = movie.tagline?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private var face: some View {
+        let score = TasteEngine.match(user: taste, film: movie.features)
+        let catalog = TMDBGenreCatalog.shared
+        let genres = movie.genreIDs.prefix(3).map { name -> String in
+            let text = catalog.name(for: name)
+            return text.prefix(1).uppercased() + text.dropFirst()
         }
-        return rows
-    }
-
-    private func cleaned(_ text: String?) -> String? {
-        guard let trimmed = text?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else {
-            return nil
-        }
-        return trimmed
-    }
-
-    private func capitalized(_ text: String) -> String {
-        text.prefix(1).uppercased() + text.dropFirst()
-    }
-
-    private func runtimeText(_ minutes: Int) -> String {
-        let hours = minutes / 60
-        let rest = minutes % 60
-        if hours > 0, rest > 0 { return "\(hours) ч \(rest) мин" }
-        if hours > 0 { return "\(hours) ч" }
-        return "\(rest) мин"
-    }
-
-    private func icon(_ system: String, _ label: String, _ accent: Color, _ action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: system)
-                .font(.system(size: 22, weight: .semibold))
-                .foregroundStyle(.black)
-                .frame(width: 58, height: 58)
-                .background(accent, in: Circle())
-                .shadow(color: .black.opacity(0.28), radius: 12, y: 6)
-        }
-        .buttonStyle(MovieMatchIconStyle())
-        .accessibilityLabel(label)
-    }
-}
-
-private struct RatingBadge: View {
-    var percent: Int
-
-    private var tint: Color {
-        switch percent {
-        case 70...: Color(red: 0.13, green: 0.82, blue: 0.48)
-        case 40..<70: Color(red: 0.82, green: 0.84, blue: 0.19)
-        default: Color(red: 0.86, green: 0.15, blue: 0.38)
-        }
-    }
-
-    var body: some View {
-        ZStack {
-            Circle().fill(Color.black.opacity(0.7))
-            Circle()
-                .stroke(tint.opacity(0.3), lineWidth: 3)
-                .padding(3)
-            Circle()
-                .trim(from: 0, to: CGFloat(min(100, max(0, percent))) / 100)
-                .stroke(tint, style: StrokeStyle(lineWidth: 3, lineCap: .round))
-                .rotationEffect(.degrees(-90))
-                .padding(3)
-            Text("\(percent)")
-                .font(.system(size: 15, weight: .bold, design: .rounded))
+        return Color.clear
+            .overlay { PosterImage(path: movie.posterPath ?? movie.backdropPath, size: "w780") }
+            .overlay {
+                LinearGradient(
+                    colors: [.black.opacity(0), .black.opacity(0.92)],
+                    startPoint: .init(x: 0.5, y: 0.35),
+                    endPoint: .bottom
+                )
+            }
+            .overlay(alignment: .bottomLeading) {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text(movie.title)
+                        .font(.system(size: 28, weight: .bold, design: .rounded))
+                        .lineLimit(2)
+                        .minimumScaleFactor(0.8)
+                    if let tagline {
+                        Text("«\(tagline)»")
+                            .font(.system(size: 15, design: .serif).italic())
+                            .foregroundStyle(.white.opacity(0.78))
+                            .lineLimit(2)
+                    }
+                    if !genres.isEmpty {
+                        ChipFlow(spacing: 6) {
+                            ForEach(genres, id: \.self) { name in
+                                Text(name)
+                                    .font(.caption.weight(.semibold))
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 4)
+                                    .background(.white.opacity(0.2), in: Capsule())
+                            }
+                        }
+                    }
+                    HStack(alignment: .top, spacing: 18) {
+                        if let ratingPercent {
+                            ratingItem(
+                                RatingRing(value: ratingPercent, tint: RatingRing.tmdbTint(ratingPercent), size: 48, accessibilityTitle: "Рейтинг TMDB"),
+                                caption: "Рейтинг TMDB"
+                            )
+                        }
+                        ratingItem(
+                            RatingRing(
+                                value: score.percent,
+                                tint: RatingRing.matchTint(score.percent),
+                                size: 48,
+                                isConfident: score.isConfident,
+                                accessibilityTitle: "Совпадение с вашим вкусом"
+                            ),
+                            caption: "Совпадение с вкусом"
+                        )
+                    }
+                }
                 .foregroundStyle(.white)
-        }
-        .frame(width: 44, height: 44)
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Рейтинг TMDB \(percent) из 100")
-    }
-}
-
-/// Чипы в несколько строк. Не влезающие по высоте строки отрезает родитель.
-private struct ChipFlow: Layout {
-    var spacing: CGFloat = 6
-
-    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
-        let width = proposal.width ?? .infinity
-        let rows = arrange(width: width, subviews: subviews)
-        let height = rows.last.map { $0.y + $0.height } ?? 0
-        return CGSize(width: proposal.width ?? rows.map(\.width).max() ?? 0, height: height)
-    }
-
-    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
-        let rows = arrange(width: bounds.width, subviews: subviews)
-        for row in rows {
-            var x = bounds.minX
-            for index in row.indices {
-                let size = subviews[index].sizeThatFits(.unspecified)
-                subviews[index].place(at: CGPoint(x: x, y: bounds.minY + row.y), proposal: ProposedViewSize(size))
-                x += size.width + spacing
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(18)
             }
+    }
+
+    private func ratingItem(_ ring: RatingRing, caption: String) -> some View {
+        HStack(spacing: 8) {
+            ring
+            Text(caption)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.white.opacity(0.85))
+                .frame(maxWidth: 74, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
-
-    private struct Row {
-        var indices: [Int] = []
-        var y: CGFloat = 0
-        var width: CGFloat = 0
-        var height: CGFloat = 0
-    }
-
-    private func arrange(width: CGFloat, subviews: Subviews) -> [Row] {
-        var rows: [Row] = [Row()]
-        for index in subviews.indices {
-            let size = subviews[index].sizeThatFits(.unspecified)
-            var row = rows[rows.count - 1]
-            let needed = row.indices.isEmpty ? size.width : row.width + spacing + size.width
-            if needed > width, !row.indices.isEmpty {
-                let nextY = row.y + row.height + spacing
-                rows.append(Row(indices: [index], y: nextY, width: size.width, height: size.height))
-                continue
-            }
-            row.indices.append(index)
-            row.width = needed
-            row.height = max(row.height, size.height)
-            rows[rows.count - 1] = row
-        }
-        return rows.filter { !$0.indices.isEmpty }
-    }
-}
-
-#if DEBUG
-#Preview("Экшен") {
-    FeedCardPreview(movie: .previewCard(
-        title: "Топ Ган: Мэверик",
-        genres: [28, 18],
-        keywords: ["fighter pilot", "aircraft"],
-        runtime: 131,
-        certification: "PG-13",
-        budget: 170_000_000,
-        year: 2022,
-        companies: ["Paramount"]
-    ))
-}
-
-#Preview("Хоррор") {
-    FeedCardPreview(movie: .previewCard(
-        title: "Реинкарнация",
-        genres: [27, 9648],
-        keywords: ["grief", "occult", "slow burn", "horror"],
-        runtime: 127,
-        certification: "R",
-        budget: 10_000_000,
-        year: 2018,
-        companies: ["A24"]
-    ))
-}
-
-#Preview("Фантастика") {
-    FeedCardPreview(movie: .previewCard(
-        title: "Дюна",
-        genres: [878, 12],
-        keywords: ["epic", "space", "empire"],
-        runtime: 155,
-        certification: "PG-13",
-        budget: 165_000_000,
-        year: 2021,
-        companies: ["Legendary"]
-    ))
-}
-
-private struct FeedCardPreview: View {
-    var movie: TMDBMovie
 
     var body: some View {
-        FeedCard(
-            movie: movie,
-            taste: TasteState(
-                mean: [
-                    .tempo: 0.45, .spectacle: 0.55, .tension: 0.4, .tone: 0.62,
-                    .plotComplexity: 0.5, .emotionalWeight: 0.48, .ideas: 0.5,
-                    .humor: 0.4, .intimacy: 0.52, .focusCharacterVsEvent: 0.46,
-                ],
-                weight: Dictionary(uniqueKeysWithValues: TasteAxis.allCases.map { ($0, 2) }),
-                rejected: [],
-                ratedCount: 8
-            ),
-            insets: EdgeInsets(top: 59, leading: 0, bottom: 34, trailing: 0),
-            onTrailer: {},
-            onDislike: {},
-            onLike: {},
-            onSuperlike: {}
-        )
-        .frame(width: 402, height: 874)
-        .preferredColorScheme(.dark)
+        face
+        .background(MovieMatchPalette.background)
+        .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 28, style: .continuous)
+                .stroke(MovieMatchPalette.stroke, lineWidth: 1)
+        }
+        .overlay(alignment: .top) {
+            HStack {
+                stamp("ПОЗЖЕ", color: MovieMatchPalette.positive)
+                    .opacity(Double(max(0, dragX) / Swipe.threshold))
+                    .rotationEffect(.degrees(-10))
+                Spacer()
+                stamp("НЕ ИНТЕРЕСНО", color: MovieMatchPalette.destructive)
+                    .opacity(Double(max(0, -dragX) / Swipe.threshold))
+                    .rotationEffect(.degrees(10))
+            }
+            .padding(22)
+            .allowsHitTesting(false)
+        }
+        .shadow(color: .black.opacity(0.18), radius: 16, y: 8)
+    }
+
+    private func stamp(_ text: String, color: Color) -> some View {
+        Text(text)
+            .font(.system(size: 22, weight: .heavy, design: .rounded))
+            .foregroundStyle(color)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10))
+            .overlay(RoundedRectangle(cornerRadius: 10).stroke(color, lineWidth: 3))
     }
 }
 
-private extension TMDBMovie {
-    static func previewCard(
-        title: String,
-        genres: [Int],
-        keywords: [String],
-        runtime: Int,
-        certification: String,
-        budget: Double,
-        year: Int,
-        companies: [String]
-    ) -> TMDBMovie {
-        TMDBMovie(
-            id: genres.reduce(0, +),
-            title: title,
-            overview: "Описание фильма в две-три строки, чтобы проверить вёрстку раздела «Обзор».",
-            posterPath: nil,
-            backdropPath: nil,
-            releaseYear: year,
-            genreIDs: genres,
-            genreNames: TMDBGenreNames.labels(for: genres),
-            keywords: keywords,
-            runtime: runtime,
-            youtubeKey: nil,
-            enriched: true,
-            certification: certification,
-            budget: budget,
-            voteAverage: 7.4,
-            voteCount: 1200,
-            productionCountries: ["США"],
-            productionCompanies: companies,
-            tagline: "Присаживайтесь",
-            director: "Режиссёр Фильма",
-            cast: [
-                TMDBCastMember(name: "Роберт Паттинсон", character: "Chris Hansen"),
-                TMDBCastMember(name: "Мерритт Уивер", character: "Andie Bender"),
-                TMDBCastMember(name: "Скайлер Джизондо", character: "Dan Plum"),
-            ]
-        )
+/// Горизонтальный свайп, который не мешает вертикальной прокрутке карточки и горизонтальным спискам внутри неё.
+private struct HorizontalPan: UIGestureRecognizerRepresentable {
+    var enabled: Bool
+    var onChanged: (CGFloat) -> Void
+    var onEnded: (CGFloat, CGFloat) -> Void
+
+    func makeCoordinator(converter: CoordinateSpaceConverter) -> Coordinator {
+        Coordinator()
+    }
+
+    func makeUIGestureRecognizer(context: Context) -> UIPanGestureRecognizer {
+        let pan = UIPanGestureRecognizer()
+        pan.delegate = context.coordinator
+        return pan
+    }
+
+    func updateUIGestureRecognizer(_ recognizer: UIPanGestureRecognizer, context: Context) {
+        recognizer.isEnabled = enabled
+    }
+
+    func handleUIGestureRecognizerAction(_ recognizer: UIPanGestureRecognizer, context: Context) {
+        let translation = recognizer.translation(in: recognizer.view).x
+        switch recognizer.state {
+        case .began, .changed:
+            onChanged(translation)
+        case .ended:
+            onEnded(translation, recognizer.velocity(in: recognizer.view).x)
+        case .cancelled, .failed:
+            onEnded(0, 0)
+        default:
+            break
+        }
+    }
+
+    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+        func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+            guard let pan = gestureRecognizer as? UIPanGestureRecognizer, let view = pan.view else { return false }
+            let velocity = pan.velocity(in: view)
+            guard abs(velocity.x) > abs(velocity.y) * 1.2 else { return false }
+            let point = pan.location(in: view)
+            var hit = view.hitTest(point, with: nil)
+            while let current = hit, current !== view {
+                if let scroll = current as? UIScrollView, scroll.contentSize.width > scroll.bounds.width + 1 {
+                    return false
+                }
+                hit = current.superview
+            }
+            return true
+        }
     }
 }
-#endif
+
+private extension Comparable {
+    func clamped(to range: ClosedRange<Self>) -> Self {
+        min(max(self, range.lowerBound), range.upperBound)
+    }
+}

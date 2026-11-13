@@ -13,7 +13,7 @@ struct OnboardingView: View {
     @State private var loved: Set<Int> = []
     @State private var step = 0
     @State private var deckIndex = 0
-    @State private var score: Int?
+    @State private var score = 50
     @State private var busyID: Int?
     @State private var missingKey = false
     @State private var banner: String?
@@ -33,7 +33,7 @@ struct OnboardingView: View {
                         subtitle: "Лента пустая, пока ключ не задан для сборки."
                     )
                 } else if isLoading && movies.isEmpty {
-                    ProgressView().tint(.white)
+                    ProgressView()
                 } else if let banner, movies.isEmpty {
                     MovieMatchMessage(title: banner, actionTitle: "Повторить") {
                         Task { await load() }
@@ -56,12 +56,12 @@ struct OnboardingView: View {
             Text(step == 0 ? "Что засело" : "Как вам эти")
                 .font(.system(size: 28, weight: .semibold))
             Text(step == 0
-                 ? "Нажмите постер, если фильм засел. Это оценка 8."
-                 : "Оценка от 0 до 10 или «не смотрел».")
+                 ? "Нажмите постер, если фильм засел."
+                 : "Оценка от 1 до 100 или «не смотрел».")
                 .font(.subheadline)
-                .foregroundStyle(.white.opacity(0.72))
+                .foregroundStyle(MovieMatchPalette.textSecondary)
         }
-        .foregroundStyle(.white)
+        .foregroundStyle(MovieMatchPalette.textPrimary)
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 20)
         .padding(.top, 12)
@@ -83,9 +83,9 @@ struct OnboardingView: View {
                             if loved.contains(movie.id) {
                                 Image(systemName: "checkmark")
                                     .font(.caption.weight(.bold))
-                                    .foregroundStyle(.black)
+                                    .foregroundStyle(MovieMatchPalette.buttonLabel)
                                     .padding(6)
-                                    .background(.white, in: Circle())
+                                    .background(MovieMatchPalette.buttonFill, in: Circle())
                                     .padding(6)
                             }
                         }
@@ -108,29 +108,16 @@ struct OnboardingView: View {
                 let movie = deck[deckIndex]
                 PosterImage(path: movie.imagePath, size: "w780")
                     .aspectRatio(2 / 3, contentMode: .fit)
-                    .frame(maxHeight: 360)
+                    .frame(maxHeight: 300)
                     .clipShape(RoundedRectangle(cornerRadius: 18))
                 Text(movie.title)
                     .font(.title3.weight(.semibold))
-                    .foregroundStyle(.white)
                     .multilineTextAlignment(.center)
-                scorePicker
+                RatingSlider(value: $score)
+                    .padding(.horizontal, 4)
             }
         }
         .padding(.horizontal, 20)
-    }
-
-    private var scorePicker: some View {
-        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 6), spacing: 8) {
-            ForEach(0...10, id: \.self) { value in
-                Button(String(value)) { score = value }
-                    .font(.system(size: 16, weight: .semibold))
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 10)
-                    .foregroundStyle(score == value ? .black : .white)
-                    .background(score == value ? Color.white : Color.white.opacity(0.08), in: Capsule())
-            }
-        }
     }
 
     private var footer: some View {
@@ -143,18 +130,17 @@ struct OnboardingView: View {
                 capsule("Готово", action: onFinish)
             } else {
                 capsule("Дальше") { Task { await rateDeck() } }
-                    .disabled(score == nil || busyID != nil)
-                    .opacity(score == nil ? 0.45 : 1)
+                    .disabled(busyID != nil)
                 Button("Не смотрел") {
-                    score = nil
+                    score = 50
                     deckIndex += 1
                 }
                 .font(.system(size: 16, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.8))
+                .foregroundStyle(MovieMatchPalette.textSecondary)
             }
             Button("Позже", action: onFinish)
                 .font(.system(size: 16, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.8))
+                .foregroundStyle(MovieMatchPalette.textSecondary)
         }
         .padding(.horizontal, 20)
         .padding(.bottom, 16)
@@ -198,18 +184,18 @@ struct OnboardingView: View {
         busyID = movie.id
         defer { busyID = nil }
         let detailed = await details(of: movie)
-        LibraryStore.rateOnboarding(detailed, score: 8, in: modelContext)
+        LibraryStore.loveOnboarding(detailed, in: modelContext)
         loved.insert(movie.id)
     }
 
     private func rateDeck() async {
-        guard deckIndex < deck.count, let score, busyID == nil else { return }
+        guard deckIndex < deck.count, busyID == nil else { return }
         let movie = deck[deckIndex]
         busyID = movie.id
         defer { busyID = nil }
         let detailed = await details(of: movie)
         LibraryStore.rateOnboarding(detailed, score: score, in: modelContext)
-        self.score = nil
+        score = 50
         deckIndex += 1
     }
 

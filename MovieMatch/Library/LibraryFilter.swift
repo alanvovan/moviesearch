@@ -9,23 +9,25 @@ struct LibraryFilter: Equatable {
     var text = ""
     var year: Int?
     var genreID: Int?
-    var ratingLower = 0
-    var ratingUpper = 10
+    var ratingLower = 1
+    var ratingUpper = 100
     var matchLower = 0
     var matchUpper = 100
-    var status: LibraryStatus?
     var requiresReview = false
 
-    var isActive: Bool {
-        !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            || year != nil
+    /// Условия из листа фильтров, без текста поиска.
+    var hasRefinements: Bool {
+        year != nil
             || genreID != nil
-            || ratingLower > 0
-            || ratingUpper < 10
+            || ratingLower > 1
+            || ratingUpper < 100
             || matchLower > 0
             || matchUpper < 100
-            || status != nil
             || requiresReview
+    }
+
+    var isActive: Bool {
+        !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || hasRefinements
     }
 
     func includes(_ movie: StoredMovie, matchPercent: Int) -> Bool {
@@ -33,9 +35,8 @@ struct LibraryFilter: Equatable {
         if !query.isEmpty, !movie.title.localizedStandardContains(query) { return false }
         if let year, movie.releaseYear != year { return false }
         if let genreID, !movie.genreIDs.contains(genreID) { return false }
-        if let status, movie.status != status { return false }
         if requiresReview, !movie.hasReview { return false }
-        if ratingLower > 0 || ratingUpper < 10 {
+        if ratingLower > 1 || ratingUpper < 100 {
             guard let rating = movie.userRating, (ratingLower...ratingUpper).contains(rating) else { return false }
         }
         if matchLower > 0 || matchUpper < 100 {
@@ -56,20 +57,11 @@ struct LibraryFilterSheet: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
-                    field("Текст", text: $draft.text)
                     picker("Год", selection: yearBinding, options: years.map { ($0, String($0)) })
                     picker("Жанр", selection: genreBinding, options: genres.map { ($0.id, $0.name) })
-                    range("Своя оценка", lower: $draft.ratingLower, upper: $draft.ratingUpper, span: 0...10)
+                    range("Своя оценка", lower: $draft.ratingLower, upper: $draft.ratingUpper, span: 1...100)
                     range("Совпадение %", lower: $draft.matchLower, upper: $draft.matchUpper, span: 0...100)
-                    Picker("Статус", selection: statusBinding) {
-                        Text("Любой").tag("any")
-                        Text("Просмотрен").tag(LibraryStatus.watched.rawValue)
-                        Text("Идея").tag(LibraryStatus.idea.rawValue)
-                        Text("Суперлайк").tag(LibraryStatus.superlike.rawValue)
-                    }
-                    .pickerStyle(.segmented)
                     Toggle("Есть отзыв", isOn: $draft.requiresReview)
-                        .tint(.white)
                     Button {
                         filter = draft
                         dismiss()
@@ -80,12 +72,15 @@ struct LibraryFilterSheet: View {
                             .padding(.vertical, 14)
                     }
                     .buttonStyle(MovieMatchCapsuleStyle())
-                    Button("Сбросить") { draft = LibraryFilter() }
-                        .font(.system(size: 16, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.8))
-                        .frame(maxWidth: .infinity)
+                    Button("Сбросить") {
+                        let text = draft.text
+                        draft = LibraryFilter()
+                        draft.text = text
+                    }
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(MovieMatchPalette.textSecondary)
+                    .frame(maxWidth: .infinity)
                 }
-                .foregroundStyle(.white)
                 .padding(20)
             }
             .movieMatchScreen()
@@ -97,8 +92,7 @@ struct LibraryFilterSheet: View {
                 }
             }
         }
-        .presentationBackground(MovieMatchPalette.background)
-        .preferredColorScheme(.dark)
+        .movieMatchSheet()
         .onAppear { draft = filter }
     }
 
@@ -114,22 +108,6 @@ struct LibraryFilterSheet: View {
             get: { draft.genreID ?? 0 },
             set: { draft.genreID = $0 == 0 ? nil : $0 }
         )
-    }
-
-    private var statusBinding: Binding<String> {
-        Binding(
-            get: { draft.status?.rawValue ?? "any" },
-            set: { draft.status = LibraryStatus(rawValue: $0) }
-        )
-    }
-
-    private func field(_ title: String, text: Binding<String>) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(title).font(.subheadline.weight(.semibold))
-            TextField(title, text: text)
-                .padding(12)
-                .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 14))
-        }
     }
 
     private func picker(_ title: String, selection: Binding<Int>, options: [(Int, String)]) -> some View {
@@ -160,6 +138,5 @@ struct LibraryFilterSheet: View {
                 step: 1
             )
         }
-        .tint(.white)
     }
 }

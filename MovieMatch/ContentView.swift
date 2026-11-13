@@ -8,6 +8,7 @@ import SwiftUI
 
 struct ContentView: View {
     @AppStorage("movieMatch.onboarding.done") private var onboardingDone = false
+    @Environment(\.modelContext) private var modelContext
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var taps = 0
     @State private var appeared = false
@@ -28,7 +29,7 @@ struct ContentView: View {
             }
         }
         .background(MovieMatchPalette.background.ignoresSafeArea())
-        .preferredColorScheme(.dark)
+        .task { LibraryStore.prepare(in: modelContext) }
         .animation(reduceMotion ? .linear(duration: 0.01) : .easeInOut(duration: 0.3), value: entered)
     }
 
@@ -42,6 +43,7 @@ struct ContentView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(MovieMatchPalette.background)
+        .environment(\.colorScheme, .dark)
         .animation(entrance, value: appeared)
         .onAppear { appeared = true }
     }
@@ -91,5 +93,5 @@ private struct MovieMatchCanvas: View {
 
 #Preview {
     ContentView()
-        .modelContainer(for: [StoredMovie.self, StoredTaste.self, StoredHide.self], inMemory: true)
+        .modelContainer(for: [StoredMovie.self, StoredTaste.self, StoredHide.self, StoredEvent.self], inMemory: true)
 }
