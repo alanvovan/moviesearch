@@ -322,8 +322,9 @@ private struct FeedScreen: View {
     private func card(_ movie: TMDBMovie, isTop: Bool) -> some View {
         let progress = min(1, abs(dragX) / Swipe.threshold)
         SwipeCard(movie: movie, taste: taste, dragX: isTop ? dragX : 0)
-            .opacity(isTop && faceHidden ? 0 : 1)
+            .opacity(isTop ? (faceHidden ? 0 : 1) : (expanded ? 0 : 1))
             .animation(nil, value: faceHidden)
+            .animation(nil, value: expanded)
             .onTapGesture {
                 guard isTop, !isFlying, abs(dragX) < 4 else { return }
                 openDetail()
