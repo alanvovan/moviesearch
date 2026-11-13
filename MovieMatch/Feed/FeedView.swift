@@ -224,7 +224,8 @@ private struct FeedScreen: View {
     @State private var isFlying = false
     @State private var watchedTarget: TMDBMovie?
     @State private var expanded = false
-    @Namespace private var cardSpace
+    @State private var tabHidden = false
+    @State private var reveal: CGFloat = 0
     @FocusState private var searchFocused: Bool
 
     private var taste: TasteState { tastes.first?.state ?? .empty }
@@ -239,7 +240,7 @@ private struct FeedScreen: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 if !model.queue.isEmpty {
                     actionBar
-                        .opacity(expanded ? 0 : 1)
+                        .opacity(faceHidden ? 0 : 1)
                         .allowsHitTesting(!expanded)
                         .accessibilityHidden(expanded)
                 }
@@ -260,7 +261,11 @@ private struct FeedScreen: View {
             }
         }
         .movieMatchScreen()
-        .toolbarVisibility(expanded ? .hidden : .automatic, for: .tabBar)
+        .toolbarVisibility(tabHidden ? .hidden : .automatic, for: .tabBar)
+        .onChange(of: expanded) { _, isExpanded in
+            guard !isExpanded else { return }
+            setTabHidden(false)
+        }
         .sensoryFeedback(.impact(weight: .medium, intensity: 0.8), trigger: model.actionTick)
         .sensoryFeedback(.selection, trigger: pastThreshold)
         .task { await model.prepareAndLoad(context: modelContext) }
@@ -275,6 +280,7 @@ private struct FeedScreen: View {
             ) { rating, review in
                 withAnimation(reduceMotion ? nil : .snappy(duration: 0.3)) {
                     expanded = false
+                    reveal = 0
                     model.watched(movie, rating: rating, review: review, context: modelContext)
                 }
             }
@@ -316,12 +322,11 @@ private struct FeedScreen: View {
     private func card(_ movie: TMDBMovie, isTop: Bool) -> some View {
         let progress = min(1, abs(dragX) / Swipe.threshold)
         SwipeCard(movie: movie, taste: taste, dragX: isTop ? dragX : 0)
-            .opacity(isTop && expanded ? 0 : 1)
-            .animation(nil, value: expanded)
-            .matchedGeometryEffect(id: isTop ? "card" : "next", in: cardSpace, isSource: isTop && !expanded)
+            .opacity(isTop && faceHidden ? 0 : 1)
+            .animation(nil, value: faceHidden)
             .onTapGesture {
                 guard isTop, !isFlying, abs(dragX) < 4 else { return }
-                withAnimation(reduceMotion ? nil : .spring(duration: 0.45, bounce: 0.12)) { expanded = true }
+                openDetail()
             }
             .scaleEffect(isTop ? 1 : 0.94 + 0.06 * progress)
             .offset(y: isTop ? 0 : 14 * (1 - progress))
@@ -341,6 +346,44 @@ private struct FeedScreen: View {
             .zIndex(isTop ? 1 : 0)
     }
 
+    /// Карточка колоды скрыта, когда детальный слой уже полностью непрозрачен.
+    private var faceHidden: Bool { expanded && reveal >= 0.25 }
+
+    private func openDetail() {
+        guard !expanded else { return }
+        expanded = true
+        Task {
+            try? await Task.sleep(for: .milliseconds(16))
+            guard expanded else { return }
+            withAnimation(reduceMotion ? nil : .smooth(duration: 0.4)) {
+                reveal = 1
+            } completion: {
+                if expanded { setTabHidden(true) }
+            }
+        }
+    }
+
+    private func closeDetail() {
+        setTabHidden(false)
+        withAnimation(reduceMotion ? nil : .smooth(duration: 0.35)) {
+            reveal = 0
+        } completion: {
+            if reveal == 0 { expanded = false }
+        }
+    }
+
+    /// Панель вкладок прячется без анимации и только после раскрытия, чтобы не менять раскладку во время анимации.
+    private func setTabHidden(_ hidden: Bool) {
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) { tabHidden = hidden }
+    }
+
+    private var windowInsets: UIEdgeInsets {
+        let scene = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
+        return scene?.keyWindow?.safeAreaInsets ?? .zero
+    }
+
     /// Детальный просмотр: карточка на весь экран, действия только кнопками поверх.
     private func detailLayer(_ movie: TMDBMovie) -> some View {
         ZStack(alignment: .bottom) {
@@ -352,7 +395,7 @@ private struct FeedScreen: View {
             .ignoresSafeArea()
             .overlay(alignment: .topTrailing) {
                 Button {
-                    withAnimation(reduceMotion ? nil : .spring(duration: 0.4, bounce: 0.1)) { expanded = false }
+                    closeDetail()
                 } label: {
                     Image(systemName: "chevron.down")
                         .font(.system(size: 15, weight: .bold))
@@ -362,11 +405,12 @@ private struct FeedScreen: View {
                 }
                 .buttonStyle(MovieMatchIconStyle())
                 .padding(14)
+                .padding(.top, windowInsets.top)
                 .accessibilityLabel("Свернуть")
             }
             actionBar
                 .padding(.top, 24)
-                .padding(.bottom, 8)
+                .padding(.bottom, 8 + windowInsets.bottom)
                 .frame(maxWidth: .infinity)
                 .background(alignment: .bottom) {
                     LinearGradient(
@@ -378,7 +422,18 @@ private struct FeedScreen: View {
                     .allowsHitTesting(false)
                 }
         }
-        .matchedGeometryEffect(id: "card", in: cardSpace, isSource: expanded)
+        .ignoresSafeArea()
+        .mask {
+            RoundedRectangle(cornerRadius: 28 * (1 - reveal), style: .continuous)
+                .padding(EdgeInsets(
+                    top: (windowInsets.top + 66) * (1 - reveal),
+                    leading: 12 * (1 - reveal),
+                    bottom: (windowInsets.bottom + 145) * (1 - reveal),
+                    trailing: 12 * (1 - reveal)
+                ))
+                .ignoresSafeArea()
+        }
+        .opacity(min(1, reveal * 4))
     }
 
     private var actionBar: some View {
@@ -423,6 +478,7 @@ private struct FeedScreen: View {
         isFlying = true
         let perform = {
             expanded = false
+            reveal = 0
             switch action {
             case .notInterested: model.notInterested(movie, context: modelContext)
             case .planLater: model.planLater(movie, context: modelContext)
