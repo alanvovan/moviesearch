@@ -113,7 +113,7 @@ nonisolated enum TasteParameters {
     static let onboardingDecayRatings = 10.0
     static let planLaterWeight = 0.25
     static let planLaterUtility = 0.5
-    static let watchedUnratedWeight = 0.15
+    static let watchedUnratedWeight = 0.0
     static let watchedUnratedUtility = 0.3
     static let notInterestedWeight = 0.35
     static let notInterestedUtility = -1.0
@@ -333,19 +333,26 @@ nonisolated enum TasteEngine {
     }
 
     static func groupValue(_ index: Int, posterior: Posterior, observations: [Observation]) -> GroupValue {
-        let n = dimension
-        let g = groupIndex(index)
-        let mu = posterior.mean[0] + posterior.mean[g]
-        let c = posterior.covariance
-        let s = max(0, c[0] + 2 * c[g] + c[g * n + g]).squareRoot()
-        let sigma = TasteParameters.noiseSD
-        let z = TasteParameters.credibleZ
-        let effective = observations.reduce(0.0) { $0 + $1.weight * $1.phi[g] }
+        // Evaluate actual genre prototypes, not an impossible film with all axes zero.
+        let group = groupOrder[index]
+        let prototypes = group.genreIDs.sorted().map { id in
+            encode(axes: FilmAxisHeuristic.axes(genreIDs: [id], keywords: [], runtimeMinutes: nil), genreIDs: [id])
+        }
+        let values = prototypes.map { phi -> (Double, Double, Double) in
+            let mean = TasteMath.dot(posterior.mean, phi)
+            let variance = max(0, TasteMath.quadratic(posterior.covariance, size: dimension, phi))
+            let spread = TasteParameters.credibleZ * variance.squareRoot()
+            let sigma = TasteParameters.noiseSD
+            return (TasteMath.normalCDF(mean / (sigma * sigma + variance).squareRoot()),
+                    TasteMath.normalCDF((mean - spread) / sigma),
+                    TasteMath.normalCDF((mean + spread) / sigma))
+        }
+        let count = Double(values.count)
         return GroupValue(
-            point: TasteMath.normalCDF(mu / sigma),
-            lower: TasteMath.normalCDF((mu - z * s) / sigma),
-            upper: TasteMath.normalCDF((mu + z * s) / sigma),
-            effective: effective
+            point: values.reduce(0) { $0 + $1.0 } / count,
+            lower: values.map { $0.1 }.min() ?? 0,
+            upper: values.map { $0.2 }.max() ?? 1,
+            effective: observations.reduce(0) { $0 + $1.weight * $1.phi[groupIndex(index)] }
         )
     }
 
@@ -353,21 +360,7 @@ nonisolated enum TasteEngine {
 
     /// Профиль — детерминированная функция журнала и момента пересчёта.
     static func rebuild(events: [TasteEvent], now: Date) -> TasteState {
-        let sorted = ordered(events)
-        var state = raw(sorted, now: now)
-        guard let last = sorted.last, last.kind != .reset, last.kind != .removeMovie else { return state }
-        let previous = raw(Array(sorted.dropLast()), now: now)
-        let step = TasteParameters.diagramStep
-        for group in groupOrder {
-            var value = state.group(group)
-            let before = previous.group(group).point
-            let shown = before + min(step, max(-step, value.point - before))
-            value.point = shown
-            value.lower = min(value.lower, shown)
-            value.upper = max(value.upper, shown)
-            state.groups[group.rawValue] = value
-        }
-        return state
+        raw(ordered(events), now: now)
     }
 
     static func raw(_ events: [TasteEvent], now: Date) -> TasteState {
@@ -459,14 +452,14 @@ nonisolated enum TasteEngine {
         return dot / (na * nb).squareRoot()
     }
 
-    /// Thompson-сэмпл + штраф за близость к отвергнутому + MMR. Возвращает id в порядке показа.
+    /// Ограниченное исследование + штраф за близость к отвергнутому + MMR. Возвращает id в порядке показа.
     static func rank(_ films: [(id: Int, features: FilmFeatures)], user: TasteState, seed: Int) -> [Int] {
         typealias P = TasteParameters
         let candidates = films.map { film -> (id: Int, phi: [Double], score: Double) in
             let phi = encode(axes: film.features.axes, genreIDs: film.features.genreIDs)
             let (mean, variance) = latent(user: user, film: film.features)
             let key = UInt64(bitPattern: Int64(film.id)) &* 0x9E37_79B9 ^ UInt64(bitPattern: Int64(seed))
-            let sample = mean + variance.squareRoot() * TasteMath.gaussian(seed: key)
+            let sample = mean + 0.1 * variance.squareRoot() * max(-1, min(1, TasteMath.gaussian(seed: key)))
             let rejected = user.rejected.map { similarity(phi, $0) }.max() ?? 0
             let score = TasteMath.normalCDF(sample / P.noiseSD) - P.rejectPenalty * max(0, rejected)
             return (film.id, phi, score)

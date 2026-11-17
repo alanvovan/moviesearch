@@ -83,7 +83,7 @@ struct AccountView: View {
             Text("Любимые жанры")
                 .font(.title3.weight(.semibold))
             GenreRadarView(values: taste.groupValues)
-            Text("Радиус — вероятность, что вам понравится типичный фильм группы. Полоса — разброс оценки, полые точки — данных пока мало.")
+            Text("Радиус — модельная оценка интереса к жанрам группы. Полоса показывает неопределённость и различия жанров; полые точки — данных пока мало. Это прогноз, а не измеренная точность.")
                 .font(.footnote)
                 .foregroundStyle(MovieMatchPalette.textSecondary)
         }

@@ -79,10 +79,12 @@ enum LibraryStore {
     /// «Просмотрено» из ленты или из поиска «+»: с оценкой или без.
     static func markWatched(_ movie: TMDBMovie, rating: Int?, review: String, in context: ModelContext) {
         let existing = fetchMovie(movie.id, in: context)
-        let finalRating = rating ?? existing?.userRating
+        let previousRating = existing?.userRating
+        let wasWatched = existing?.status.isWatched ?? false
+        let finalRating = rating ?? previousRating
         let row = upsert(movie, status: finalRating == nil ? .unrated : .watched, in: context)
         row.reviewText = review.trimmingCharacters(in: .whitespacesAndNewlines)
-        apply(rating: rating, previous: existing?.userRating, wasWatched: existing?.status.isWatched ?? false, row: row, in: context)
+        apply(rating: rating, previous: previousRating, wasWatched: wasWatched, row: row, in: context)
     }
 
     // MARK: Библиотека

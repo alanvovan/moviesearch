@@ -441,3 +441,23 @@ enum LibraryMigration { static func scaled(_ old: Int) -> Int }   // clamp(10 * 
 ```
 
 Хранение: `StoredEvent` (SwiftData) с полями события; запись → `LibraryStore` → `rebuild` → `StoredTaste`. Миграция 0…10 → 1…100 выполняется один раз (флаг версии в `UserDefaults`) и строит журнал из `StoredMovie`: оценка → `rate` (время `watchedAt ?? savedAt`), `idea` и бывший `superlike` → `planLater`, `unrated` → `watchedUnrated`.
+
+## Revision: consistent genre predictions
+
+The implementation now supersedes the old diagram step limit and zero-axis
+prototype in this document. Each group averages posterior predictive scores of
+its individual TMDB genres, encoded with the same FilmAxisHeuristic as films.
+The shaded envelope spans their latent 80% intervals; it is not a calibrated
+confidence interval for a population average. No numerical smoothing is applied.
+Watched-without-rating has zero preference weight (watching is not approval).
+Ranking uses bounded exploration (0.1 posterior standard deviations, clipped
+normal draw), rejection similarity and diversity. Remaining cards are reranked
+after feedback. Onboarding loves and ratings retain their existing weaker weights.
+
+These are model estimates, not empirically calibrated probabilities. A 90% hit
+rate requires prospective evaluation: predict before each new rating, count a
+hit with a predefined positive-rating threshold, and report precision@K,
+coverage, sample size and uncertainty. Do not evaluate on training ratings.
+Genre prototypes cannot capture directors, actors or semantic themes missing
+from the catalog features. Explicit favorite-genre selection is not currently
+part of onboarding; favorites are inferred from selected films and ratings.
